@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - 2026-09-10
+## [0.3.1] - 2026-09-10
+
+### Fixed
+
+- **vault:** forward `return_url` / `cancel_url` from the checkout session data into `createOrder` — PayPal rejects any order that vaults a payment source with 422 RETURN_URL_REQUIRED / CANCEL_URL_REQUIRED when the approval context lacks them (live-verified on sandbox). URLs ride in the session data; CIT-only, merchant-initiated (vaultId) charges are unaffected.
+
+## [0.3.0]
 
 First release of the forked package `@mengyyy369/medusa-paypal`, based on
 upstream `@alphabite/medusa-paypal` 0.2.6.

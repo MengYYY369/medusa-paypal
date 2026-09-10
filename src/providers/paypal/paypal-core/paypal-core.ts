@@ -39,6 +39,13 @@ export interface PaypalCreateOrderInput {
    * with the given merchant-side customer id.
    */
   vaultCustomerId?: string;
+  /**
+   * Required by PayPal whenever the order vaults a payment source
+   * (RETURN_URL_REQUIRED / CANCEL_URL_REQUIRED). Only read for CIT flows —
+   * merchant-initiated (vaultId) orders never show an approval page.
+   */
+  return_url?: string;
+  cancel_url?: string;
 }
 
 export class PaypalService {
@@ -130,6 +137,8 @@ export class PaypalService {
     email,
     vaultId,
     vaultCustomerId,
+    return_url,
+    cancel_url,
   }: PaypalCreateOrderInput): Promise<Order> {
     const ordersController = new OrdersController(this.client);
 
@@ -192,11 +201,15 @@ export class PaypalService {
           },
         ],
         // Approval experience is only meaningful when a buyer is present;
-        // off-session vault charges must not request payer action.
+        // off-session vault charges must not request payer action. PayPal
+        // REQUIRES return_url/cancel_url on any order that vaults a source
+        // (422 RETURN_URL_REQUIRED / CANCEL_URL_REQUIRED otherwise).
         ...(vaultId
           ? {}
           : {
               applicationContext: {
+                ...(return_url && { returnUrl: return_url }),
+                ...(cancel_url && { cancelUrl: cancel_url }),
                 ...(this.includeShippingData &&
                   shippingData && {
                     shippingPreference:

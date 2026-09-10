@@ -169,11 +169,17 @@ type ProviderPaymentMethod = {
 
 interface InitiatePaymentInputCustom
   extends Omit<InitiatePaymentInput, "data"> {
-  data?: Pick<PaypalCreateOrderInput, "items" | "shipping_info" | "email">;
+  data?: Pick<
+    PaypalCreateOrderInput,
+    "items" | "shipping_info" | "email" | "return_url" | "cancel_url"
+  >;
 }
 
 interface AuthorizePaymentInputData
-  extends Pick<PaypalCreateOrderInput, "items" | "shipping_info" | "email"> {}
+  extends Pick<
+    PaypalCreateOrderInput,
+    "items" | "shipping_info" | "email" | "return_url" | "cancel_url"
+  > {}
 
 export default class PaypalModuleService extends AbstractPaymentProvider<PaypalPluginOptionsType> {
   static identifier = "paypal";
@@ -310,6 +316,8 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
           items: data?.items,
           shipping_info: data?.shipping_info,
           email: data?.email,
+          return_url: typeof data?.return_url === "string" ? data.return_url : undefined,
+          cancel_url: typeof data?.cancel_url === "string" ? data.cancel_url : undefined,
         });
 
         if (!captureData) {
@@ -366,6 +374,8 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
           items: data?.items,
           shipping_info: data?.shipping_info,
           email: data?.email,
+          return_url: typeof data?.return_url === "string" ? data.return_url : undefined,
+          cancel_url: typeof data?.cancel_url === "string" ? data.cancel_url : undefined,
         });
 
         return {
@@ -463,6 +473,8 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
           typeof sessionData.customer_id === "string"
             ? sessionData.customer_id
             : undefined,
+        return_url: typeof data?.return_url === "string" ? data.return_url : undefined,
+        cancel_url: typeof data?.cancel_url === "string" ? data.cancel_url : undefined,
       });
 
       const approveLink = order.links?.find((link) => link.rel === "approve")
