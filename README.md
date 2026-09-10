@@ -1,9 +1,12 @@
 # 📝 PayPal Plugin for Medusa
 
-[![Discord](https://img.shields.io/badge/Join%20our%20Discord-Community%20Server-7289da.svg)](https://discord.gg/ZgBCYTMaVQ)
-[![Documentation](https://img.shields.io/badge/Read%20the%20full-Documentation-blue.svg)](https://medusa-docs.alphabite.io/docs/category/paypal)
+[![npm](https://img.shields.io/badge/npm-@mengyyy369%2Fmedusa--paypal-blue.svg)](https://www.npmjs.com/package/@mengyyy369/medusa-paypal)
 
-The Alphabite PayPal Plugin integrates PayPal payment processing into your Medusa store. It handles various payment flows, including capturing payments, managing refunds, and ensuring robust error handling.
+A Medusa v2 PayPal payment provider, forked from Alphabite's plugin and extended
+with vaulted off-session charging: buyers approve PayPal once at checkout, the
+wallet is stored through the PayPal Vault API, and recurring charges (subscription
+renewals) run without the buyer present. Also handles one-shot captures, refunds,
+and webhook verification.
 
 ---
 
@@ -11,15 +14,11 @@ The Alphabite PayPal Plugin integrates PayPal payment processing into your Medus
 
 Pick the plugin version that matches your Medusa backend version:
 
-| Medusa Version     | Plugin Version | Install Command                              |
-| ------------------ | -------------- | -------------------------------------------- |
-| `>= 2.13.*`        | `latest`       | `npm install @alphabite/medusa-paypal`       |
-| `< 2.13.*`         | `0.2.5`        | `npm install @alphabite/medusa-paypal@0.2.5` |
-
-### Instructions
-
-- **Medusa 2.13.\* and above:** Install the latest version of the plugin. This is the actively maintained release and is required for compatibility with the latest Medusa APIs.
-- **Medusa below 2.13.\*:** Pin the plugin to version `0.2.5`. Later plugin versions rely on APIs introduced in Medusa 2.13 and will not work on older backends.
+| Medusa Version     | Plugin Version | Install Command                                |
+| ------------------ | -------------- | ---------------------------------------------- |
+| `>= 2.20.*`        | `latest`       | `npm install @mengyyy369/medusa-paypal`        |
+| `2.13.* – 2.19.*`  | `0.2.6`        | `npm install @mengyyy369/medusa-paypal@0.2.6`  |
+| older / original   | —              | `npm install @alphabite/medusa-paypal`         |
 
 Before installing, verify your Medusa version:
 
@@ -27,26 +26,7 @@ Before installing, verify your Medusa version:
 npm list @medusajs/medusa
 ```
 
-Then install the matching plugin version:
-
-```bash
-# Medusa >= 2.13.* (latest)
-npm install @alphabite/medusa-paypal
-
-# Medusa < 2.13.* (pinned)
-npm install @alphabite/medusa-paypal@0.2.5
-```
-
 > ⚠️ Use the same plugin version across local, staging, and production to avoid runtime errors.
-
----
-
-# 📝 PayPal Plugin for Medusa
-
-[![Discord](https://img.shields.io/badge/Join%20our%20Discord-Community%20Server-7289da.svg)](https://discord.gg/ZgBCYTMaVQ)
-[![Documentation](https://img.shields.io/badge/Read%20the%20full-Documentation-blue.svg)](https://medusa-docs.alphabite.io/docs/category/paypal)
-
-The Alphabite PayPal Plugin integrates PayPal payment processing into your Medusa store. It handles various payment flows, including capturing payments, managing refunds, and ensuring robust error handling.
 
 ---
 
@@ -56,6 +36,7 @@ The Alphabite PayPal Plugin integrates PayPal payment processing into your Medus
 - [🧱 Compatibility](#-compatibility)
 - [🛠 Common Use Cases](#-common-use-cases)
 - [📦 Installation](#-installation)
+- [🔁 Vaulted Auto-Renewals](#-vaulted-auto-renewals)
 - [⚙️ Plugin Options](#-plugin-options)
 - [📖 Documentation](#-documentation)
 
@@ -64,6 +45,7 @@ The Alphabite PayPal Plugin integrates PayPal payment processing into your Medus
 ## 🎯 Core Features
 
 - ✅ Seamless PayPal payment integration
+- 🔁 Vaulted auto-renewals: save the buyer's PayPal wallet at checkout and charge it off-session on every billing cycle
 - 🔄 Handles various PayPal error states
 - 💰 Supports refunds directly from Medusa Admin
 - 🛒 Creates new order IDs for each payment attempt within the same payment intent
@@ -106,7 +88,7 @@ This guide walks you through installing and configuring the Alphabite PayPal Plu
 Install the package via npm:
 
 ```bash
-npm install @alphabite/medusa-paypal
+npm install @mengyyy369/medusa-paypal
 ```
 
 ---
@@ -119,7 +101,7 @@ Add the plugin to your `medusa.config.ts` or `medusa-config.js`:
 {
   plugins: [
     {
-      resolve: "@alphabite/medusa-paypal",
+      resolve: "@mengyyy369/medusa-paypal",
       options: {
         clientId: process.env.PAYPAL_CLIENT_ID,
         clientSecret: process.env.PAYPAL_CLIENT_SECRET,
@@ -153,6 +135,60 @@ Add the plugin to your `medusa.config.ts` or `medusa-config.js`:
   ]
 };
 ```
+
+---
+
+## 🔁 Vaulted Auto-Renewals
+
+The provider integrates with subscription engines such as
+[@mengyyy369/reorder](https://github.com/MengYYY369/reorder): the engine owns the
+billing schedule, dunning, and payment-method swaps; this provider supplies the
+PayPal rail.
+
+### Checkout (save the wallet)
+
+1. Create the cart payment session with `customer_id` in the session data:
+
+```ts
+await paymentModule.createPaymentSession(paymentCollectionId, {
+  provider_id: "pp_paypal_paypal",
+  data: { customer_id: customer.id },
+})
+```
+
+2. The provider creates the PayPal order with
+   `payment_source.paypal.attributes.vault` (`store_in_vault: "ON_SUCCESS"`,
+   usage type `MERCHANT`) associated with that customer id. The buyer approves
+   through the PayPal JS SDK or the approval link exposed as
+   `data.redirect_url`.
+3. After capture the provider stores the PayPal vault token id in the session
+   data as `payment_method` — the key a subscription engine reads as the
+   reusable payment method reference.
+4. Call `POST /store/paypal/account-holder` (authenticated customer) once so
+   saved methods can be listed and swapped through Medusa account holders.
+
+### Renewal (charge off-session)
+
+The subscription engine creates each renewal session with
+`data: { payment_method: "<vault token id>", off_session: true, confirm: true, capture_method: "automatic" }`.
+The provider creates a PayPal order against `payment_source.paypal.vault_id`
+and captures it in the same call — no buyer interaction. Declines throw a
+Medusa error carrying `decline_code` (for example `INSTRUMENT_DECLINED`) so the
+engine's dunning classification can treat it permanently and recover through a
+payment-method change instead of a pointless retry.
+
+### PayPal account requirements
+
+Vaulting is gated on the PayPal account and application:
+
+1. Reference-transaction approval — contact your PayPal account manager.
+2. The account eligibility review under Account Settings → Payment preferences →
+   "Save PayPal and Venmo payment methods".
+3. The "Save payment methods" feature toggle for the REST application in the
+   PayPal Developer Dashboard. Enable it for the sandbox application too, or
+   vault tests fail.
+4. RDA (risk data) is mandatory on customer-approved flows; collect it through
+   the official PayPal JS SDK.
 
 ---
 

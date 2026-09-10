@@ -6,5 +6,9 @@ export default defineMiddlewares({
       matcher: "/store/paypal/client-token",
       methods: ["POST"],
     },
+    {
+      matcher: "/store/paypal/account-holder",
+      methods: ["POST"],
+    },
   ],
 });

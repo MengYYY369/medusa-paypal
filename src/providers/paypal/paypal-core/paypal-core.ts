@@ -8,16 +8,21 @@ import {
   OrderAuthorizeResponse,
   OrdersController,
   PaymentsController,
+  PaypalPaymentTokenUsageType,
+  PaymentSource,
+  PaymentTokenResponse,
   Refund,
   Item,
   ShippingDetails,
   OrderApplicationContextShippingPreference,
   OrderApplicationContextUserAction,
   FulfillmentType,
+  StoreInVaultInstruction,
+  VaultController,
 } from "@paypal/paypal-server-sdk";
 import { CartAddressDTO, CartLineItemDTO } from "@medusajs/framework/types";
 import { parsePhoneNumberFromString } from "libphonenumber-js";
-import { AlphabitePaypalPluginOptionsType } from "../service";
+import { PaypalPluginOptionsType } from "../service";
 import { MedusaError } from "@medusajs/framework/utils";
 
 export interface PaypalCreateOrderInput {
@@ -27,12 +32,20 @@ export interface PaypalCreateOrderInput {
   shipping_info?: CartAddressDTO;
   items?: CartLineItemDTO[];
   email?: string;
+  /** PayPal v3 payment-token id to charge off-session (merchant-initiated). */
+  vaultId?: string;
+  /**
+   * Opt in to saving the PayPal wallet on successful checkout, associated
+   * with the given merchant-side customer id.
+   */
+  vaultCustomerId?: string;
 }
 
 export class PaypalService {
   private client: Client;
   private ordersController: OrdersController;
   private paymentsController: PaymentsController;
+  private vaultController: VaultController;
   private authController: OAuthAuthorizationController;
   private clientId: string;
   private clientSecret: string;
@@ -48,7 +61,7 @@ export class PaypalService {
     webhookId,
     includeCustomerData,
     includeShippingData,
-  }: AlphabitePaypalPluginOptionsType) {
+  }: PaypalPluginOptionsType) {
     const environment = isSandbox
       ? Environment.Sandbox
       : Environment.Production;
@@ -81,6 +94,7 @@ export class PaypalService {
 
     this.ordersController = new OrdersController(this.client);
     this.paymentsController = new PaymentsController(this.client);
+    this.vaultController = new VaultController(this.client);
     this.authController = new OAuthAuthorizationController(this.client);
 
     this.includeCustomerData = !!includeCustomerData;
@@ -114,6 +128,8 @@ export class PaypalService {
     shipping_info,
     items,
     email,
+    vaultId,
+    vaultCustomerId,
   }: PaypalCreateOrderInput): Promise<Order> {
     const ordersController = new OrdersController(this.client);
 
@@ -129,6 +145,22 @@ export class PaypalService {
 
     const hasItems = paypalItems.length > 0;
 
+    const paymentSource: PaymentSource | undefined = vaultId
+      ? { paypal: { vaultId } }
+      : vaultCustomerId
+        ? {
+            paypal: {
+              attributes: {
+                vault: {
+                  storeInVault: StoreInVaultInstruction.OnSuccess,
+                  usageType: PaypalPaymentTokenUsageType.Merchant,
+                },
+                customer: { merchantCustomerId: vaultCustomerId },
+              },
+            },
+          }
+        : undefined;
+
     const shippingData: ShippingDetails | false = !!shipping_info && {
       ...(this.includeCustomerData &&
         this.mapCustomerData({ email, shipping_info })),
@@ -139,6 +171,7 @@ export class PaypalService {
     const createdOrder = await ordersController.createOrder({
       body: {
         intent: CheckoutPaymentIntent.Capture,
+        ...(paymentSource && { paymentSource }),
         purchaseUnits: [
           {
             amount: {
@@ -158,14 +191,20 @@ export class PaypalService {
             ...(shippingData && { shipping: shippingData }),
           },
         ],
-        applicationContext: {
-          ...(this.includeShippingData &&
-            shippingData && {
-              shippingPreference:
-                OrderApplicationContextShippingPreference.SetProvidedAddress,
+        // Approval experience is only meaningful when a buyer is present;
+        // off-session vault charges must not request payer action.
+        ...(vaultId
+          ? {}
+          : {
+              applicationContext: {
+                ...(this.includeShippingData &&
+                  shippingData && {
+                    shippingPreference:
+                      OrderApplicationContextShippingPreference.SetProvidedAddress,
+                  }),
+                userAction: OrderApplicationContextUserAction.PayNow,
+              },
             }),
-          userAction: OrderApplicationContextUserAction.PayNow,
-        },
       },
     });
 
@@ -196,6 +235,21 @@ export class PaypalService {
     });
 
     return authorizedOrder.result;
+  }
+
+  /**
+   * Lists the vaulted PayPal wallets of a customer. `customerId` is the
+   * merchant-side customer id that was associated with the wallet when it
+   * was saved (merchant_customer_id at vault time).
+   */
+  async listVaultedPaymentMethods(
+    customerId: string
+  ): Promise<PaymentTokenResponse[]> {
+    const response = await this.vaultController.listCustomerPaymentTokens({
+      customerId,
+    });
+
+    return response.result.paymentTokens ?? [];
   }
 
   async refundPayment(captureIds: string[]): Promise<Refund[]> {

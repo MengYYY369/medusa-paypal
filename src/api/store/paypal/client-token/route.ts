@@ -1,12 +1,12 @@
 import { MedusaRequest, MedusaResponse } from "@medusajs/framework";
 import { PostStorePaypalPaymentType } from "./validators";
-import { PaypalService } from "@alphabite/medusa-paypal/providers/paypal/paypal-core";
-import { AlphabitePaypalPluginOptionsType } from "src/providers/paypal/service";
+import { PaypalService } from "../../../../providers/paypal/paypal-core";
+import { PaypalPluginOptionsType } from "../../../../providers/paypal/service";
 
 interface PaymentProvidersProps {
   resolve: string;
   id: string;
-  options: AlphabitePaypalPluginOptionsType;
+  options: PaypalPluginOptionsType;
 }
 
 const base =

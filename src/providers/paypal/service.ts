@@ -23,7 +23,11 @@ import {
   UpdatePaymentOutput,
   WebhookActionResult,
 } from "@medusajs/framework/types";
-import { CaptureStatus, Order } from "@paypal/paypal-server-sdk";
+import {
+  CaptureStatus,
+  Order,
+  PaymentTokenResponse,
+} from "@paypal/paypal-server-sdk";
 import { WebhookPayload } from "./types";
 import { PaypalCreateOrderInput, PaypalService } from "./paypal-core";
 import { z } from "zod";
@@ -34,6 +38,51 @@ export interface PaypalPaymentError {
   retryable: boolean;
   avsCode?: string;
   cvvCode?: string;
+}
+
+type PaypalErrorDetail = {
+  issue?: string;
+  description?: string;
+};
+
+type PaypalErrorBody = {
+  name?: string;
+  message?: string;
+  details?: PaypalErrorDetail[];
+};
+
+/**
+ * Pulls the decline reason out of a PayPal API error. PayPal error responses
+ * carry `details[].issue` (e.g. INSTRUMENT_DECLINED); the SDK exposes them on
+ * `error.result` or as a JSON string on `error.body` depending on the path.
+ */
+function extractPaypalDecline(error: unknown): PaypalErrorDetail {
+  if (error === null || typeof error !== "object") {
+    return {};
+  }
+
+  const candidate = error as { body?: unknown; result?: unknown };
+  const raw = candidate.result ?? candidate.body;
+
+  let body: PaypalErrorBody | undefined;
+
+  if (typeof raw === "string") {
+    try {
+      body = JSON.parse(raw) as PaypalErrorBody;
+    } catch {
+      return {};
+    }
+  } else if (raw !== null && typeof raw === "object") {
+    body = raw as PaypalErrorBody;
+  }
+
+  const firstDetail = body?.details?.[0];
+
+  if (firstDetail?.issue) {
+    return { issue: firstDetail.issue, description: firstDetail.description };
+  }
+
+  return { issue: body?.name, description: body?.message };
 }
 
 const optionsSchema = z.object({
@@ -50,9 +99,9 @@ const optionsSchema = z.object({
   includeCustomerData: z.boolean().default(false),
 });
 
-export type AlphabitePaypalPluginOptionsType = z.infer<typeof optionsSchema>;
+export type PaypalPluginOptionsType = z.infer<typeof optionsSchema>;
 
-export type AlphabitePaypalPluginOptions = {
+export type PaypalPluginOptions = {
   /**
    * PayPal client ID used for authentication.
    * This field is required.
@@ -95,6 +144,29 @@ type InjectedDependencies = {
   paymentModuleService: any;
 };
 
+type ProviderAccountHolderInput = {
+  context?: {
+    customer?: { id?: string; email?: string } | null;
+    account_holder?: {
+      id?: string;
+      external_id?: string | null;
+      email?: string | null;
+      data?: Record<string, unknown> | null;
+    } | null;
+    [key: string]: unknown;
+  };
+};
+
+type ProviderAccountHolderOutput = {
+  id?: string;
+  data?: Record<string, unknown>;
+};
+
+type ProviderPaymentMethod = {
+  id: string;
+  data: Record<string, unknown>;
+};
+
 interface InitiatePaymentInputCustom
   extends Omit<InitiatePaymentInput, "data"> {
   data?: Pick<PaypalCreateOrderInput, "items" | "shipping_info" | "email">;
@@ -103,7 +175,7 @@ interface InitiatePaymentInputCustom
 interface AuthorizePaymentInputData
   extends Pick<PaypalCreateOrderInput, "items" | "shipping_info" | "email"> {}
 
-export default class PaypalModuleService extends AbstractPaymentProvider<AlphabitePaypalPluginOptionsType> {
+export default class PaypalModuleService extends AbstractPaymentProvider<PaypalPluginOptionsType> {
   static identifier = "paypal";
 
   protected client: PaypalService;
@@ -112,7 +184,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
 
   constructor(
     container: InjectedDependencies,
-    private readonly options: AlphabitePaypalPluginOptionsType
+    private readonly options: PaypalPluginOptionsType
   ) {
     super(container, options);
 
@@ -122,7 +194,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
     this.client = new PaypalService(this.options);
   }
 
-  static validateOptions(options: AlphabitePaypalPluginOptionsType): void {
+  static validateOptions(options: PaypalPluginOptionsType): void {
     const result = optionsSchema.safeParse(options);
 
     if (!result.success) {
@@ -166,11 +238,12 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
 
       const id = input.data.id as string;
 
-      await this.client.captureOrder(id);
+      const captured = await this.client.captureOrder(id);
 
       return {
         data: {
           ...input.data,
+          ...this.withVaultReference(captured),
           status: PaymentSessionStatus.CAPTURED,
           captured_at: new Date().toISOString(),
         },
@@ -195,6 +268,14 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
       );
     }
 
+    // Merchant-initiated (off-session) renewals carry no PayPal order id;
+    // they charge the vaulted wallet directly, before the CIT validation.
+    const sessionData = input.data as Record<string, unknown>;
+
+    if (sessionData.off_session && sessionData.payment_method) {
+      return this.authorizeOffSessionPayment(input);
+    }
+
     const data = input.data as unknown as AuthorizePaymentInputData | undefined;
 
     let paypalData = input.data as Order | undefined;
@@ -210,11 +291,11 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
       );
     }
 
-    const isAuthorized =
-      paypalData?.purchaseUnits?.[0].payments?.captures?.[0]?.status ===
-      CaptureStatus.Completed;
+      const isAuthorized =
+        paypalData?.purchaseUnits?.[0].payments?.captures?.[0]?.status ===
+        CaptureStatus.Completed;
 
-    if (!isAuthorized) {
+      if (!isAuthorized) {
       try {
         paypalData = await this.client.captureOrder(orderId);
       } catch (err) {
@@ -299,9 +380,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
     }
 
     return {
-      data: {
-        ...paypalData,
-      },
+      data: this.withVaultReference(paypalData as Order),
       status: PaymentSessionStatus.AUTHORIZED,
     };
   }
@@ -361,6 +440,18 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
         );
       }
 
+      const sessionData = (data ?? {}) as Record<string, unknown>;
+
+      if (sessionData.off_session && sessionData.payment_method) {
+        // Merchant-initiated renewal: no PayPal order is created up front.
+        // The order against the vaulted wallet is created and captured in
+        // authorizePayment, which Medusa calls next.
+        return {
+          id: String(sessionData.payment_method),
+          data: { ...sessionData, amount, currency_code, ...(context ?? {}) },
+        };
+      }
+
       const order = await this.client.createOrder({
         amount: Number(amount),
         currency: currency_code,
@@ -368,10 +459,26 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
         items: data?.items,
         shipping_info: data?.shipping_info,
         email: data?.email,
+        vaultCustomerId:
+          typeof sessionData.customer_id === "string"
+            ? sessionData.customer_id
+            : undefined,
       });
 
+      const approveLink = order.links?.find((link) => link.rel === "approve")
+        ?.href;
+
       return {
-        data: { ...data, ...order, ...context, amount, currency_code },
+        data: {
+          ...data,
+          ...order,
+          ...context,
+          amount,
+          currency_code,
+          // PayPal's payer approval link. Consumed by redirect-only flows
+          // (manual renewals) and useful as a fallback for storefronts.
+          ...(approveLink && { redirect_url: approveLink }),
+        },
 
         id: order.id!,
       };
@@ -457,6 +564,70 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
     }
   }
 
+  /**
+   * Registers a Medusa account holder for a customer. PayPal has no
+   * server-side holder entity: the Medusa customer id doubles as the
+   * merchant-side customer id used to associate wallets at save time
+   * (merchant_customer_id) and to list them afterwards.
+   */
+  async createAccountHolder(
+    input: ProviderAccountHolderInput
+  ): Promise<ProviderAccountHolderOutput> {
+    const customerId = input.context?.customer?.id;
+
+    if (!customerId) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "PayPal account holder creation requires a customer"
+      );
+    }
+
+    return {
+      id: customerId,
+      data: {
+        ...(input.context?.customer?.email && {
+          email: input.context.customer.email,
+        }),
+      },
+    };
+  }
+
+  /**
+   * Lists the vaulted PayPal wallets saved for an account holder. The
+   * holder's external id is the merchant-side customer id the wallets were
+   * associated with when they were saved.
+   */
+  async listPaymentMethods(input: {
+    context?: {
+      account_holder?: {
+        external_id?: string | null;
+      } | null;
+    };
+  }): Promise<ProviderPaymentMethod[]> {
+    const externalId = input.context?.account_holder?.external_id;
+
+    if (!externalId) {
+      return [];
+    }
+
+    const tokens = await this.client.listVaultedPaymentMethods(
+      String(externalId)
+    );
+
+    return tokens
+      .filter(
+        (token): token is PaymentTokenResponse & { id: string } =>
+          !!token.id && !!token.paymentSource?.paypal
+      )
+      .map((token) => ({
+        id: token.id,
+        data: {
+          type: "paypal",
+          email: token.paymentSource?.paypal?.emailAddress ?? null,
+        },
+      }));
+  }
+
   async getPaymentStatus(
     input: GetPaymentStatusInput
   ): Promise<GetPaymentStatusOutput> {
@@ -519,34 +690,157 @@ export default class PaypalModuleService extends AbstractPaymentProvider<Alphabi
   async getWebhookActionAndData(
     payload: WebhookPayload
   ): Promise<WebhookActionResult> {
+    const { data, headers } = payload;
+
     try {
-      const { data, headers } = payload;
-
       await this.client.verifyWebhook({ headers, body: data });
-
-      switch (data.event_type) {
-        case "PAYMENT.CAPTURE.COMPLETED":
-          return {
-            action: "captured",
-            data: {
-              session_id: data.resource.custom_id,
-              amount: Number(data.resource.amount.value),
-            },
-          };
-        default:
-          return {
-            action: "not_supported",
-          };
-      }
     } catch (e) {
-      return {
-        action: "failed",
-        data: {
-          session_id: payload.data.resource.custom_id,
-          amount: Number(payload.data.resource.amount.value),
-        },
-      };
+      // Never act on events whose signature could not be verified. In
+      // particular, returning action "failed" here would let an
+      // unverifiable event tear down payment sessions.
+      this.logger.warn(
+        `PayPal webhook signature verification failed: ${String(e)}`
+      );
+      return { action: "not_supported" };
     }
+
+    switch (data.event_type) {
+      case "PAYMENT.CAPTURE.COMPLETED":
+        return {
+          action: "captured",
+          data: {
+            session_id: data.resource.custom_id,
+            amount: Number(data.resource.amount.value),
+          },
+        };
+      case "PAYMENT.CAPTURE.DECLINED":
+        // Medusa's webhook subscriber ignores "failed" actions; emitting
+        // one documents the decline for merchants hooking the event stream
+        // without risking session state.
+        if (!data.resource.custom_id) {
+          this.logger.warn(
+            "PayPal capture declined webhook without a session reference; ignoring"
+          );
+          return { action: "not_supported" };
+        }
+        return {
+          action: "failed",
+          data: {
+            session_id: data.resource.custom_id,
+            amount: Number(data.resource.amount?.value ?? 0),
+          },
+        };
+      // VAULT.PAYMENT-TOKEN.DELETED intentionally maps to not_supported:
+      // saved-method listings read live vault state, so a deleted token
+      // disappears on the next list without session side effects.
+      default:
+        return {
+          action: "not_supported",
+        };
+    }
+  }
+
+  /**
+   * Charges a vaulted PayPal wallet off-session (merchant-initiated): the
+   * buyer is not present, so the order is created against the stored v3
+   * payment token and captured in the same call. Every failure throws a
+   * MedusaError carrying the PayPal decline reason as `decline_code` so the
+   * subscription engine's dunning classification can map it.
+   */
+  private async authorizeOffSessionPayment(
+    input: AuthorizePaymentInput
+  ): Promise<AuthorizePaymentOutput> {
+    const data = input.data as Record<string, unknown>;
+    const amount = Number(data.amount);
+    const currencyCode = data.currency_code as string;
+    const vaultId = data.payment_method as string;
+
+    if (!amount || !currencyCode || !vaultId) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "PayPal off-session payment requires amount, currency code and a vaulted payment method reference"
+      );
+    }
+
+    let order: Order;
+    try {
+      order = await this.client.createOrder({
+        amount,
+        currency: currencyCode,
+        sessionId: input.context?.idempotency_key,
+        vaultId,
+      });
+    } catch (error) {
+      throw this.toOffSessionFailure(
+        error,
+        "Failed to create PayPal off-session order"
+      );
+    }
+
+    let captured: Order;
+    try {
+      captured = await this.client.captureOrder(order.id!);
+    } catch (error) {
+      throw this.toOffSessionFailure(error, "PayPal off-session capture failed");
+    }
+
+    const capture = captured.purchaseUnits?.[0]?.payments?.captures?.[0];
+
+    if (capture?.status !== CaptureStatus.Completed) {
+      throw new MedusaError(
+        MedusaError.Types.UNAUTHORIZED,
+        `PayPal off-session capture did not complete (status: ${
+          capture?.status ?? "unknown"
+        })`
+      );
+    }
+
+    return {
+      status: PaymentSessionStatus.AUTHORIZED,
+      data: {
+        ...data,
+        ...this.withVaultReference(captured),
+        status: "COMPLETED",
+        captured_at: new Date().toISOString(),
+      },
+    };
+  }
+
+  /**
+   * Copies the vaulted payment token id of a captured PayPal order into the
+   * session data as `payment_method`, the key the reorder subscription
+   * engine stores in its payment context for off-session renewals.
+   */
+  private withVaultReference(order: Order): Record<string, unknown> {
+    const vault = order.paymentSource?.paypal?.attributes?.vault;
+
+    if (!vault?.id) {
+      return { ...order };
+    }
+
+    return {
+      ...order,
+      vault_id: vault.id,
+      payment_method: vault.id,
+      ...(vault.status && { vault_status: vault.status }),
+    };
+  }
+
+  private toOffSessionFailure(error: unknown, fallback: string): MedusaError {
+    const { issue, description } = extractPaypalDecline(error);
+
+    const message = issue
+      ? `${fallback}: ${issue}${description ? ` — ${description}` : ""}`
+      : fallback;
+
+    const medusaError = new MedusaError(MedusaError.Types.UNAUTHORIZED, message);
+
+    if (issue) {
+      (medusaError as MedusaError & { decline_code?: string }).decline_code =
+        issue;
+    }
+
+    return medusaError;
   }
 
   private checkPaymentStatus(
