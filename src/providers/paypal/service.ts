@@ -30,6 +30,12 @@ import {
 } from "@paypal/paypal-server-sdk";
 import { WebhookPayload } from "./types";
 import { PaypalCreateOrderInput, PaypalService } from "./paypal-core";
+import {
+  SubscriptionEngine,
+  SubscriptionEngineModules,
+  SubscriptionEngineOptions,
+} from "../../subscription/engine";
+import { isSubscriptionEvent } from "../../subscription/engine";
 import { z } from "zod";
 
 export interface PaypalPaymentError {
@@ -95,8 +101,15 @@ const optionsSchema = z.object({
   clientSecret: z.string().min(1, "PayPal client secret is required"),
   isSandbox: z.boolean().default(false),
   webhookId: z.string().optional(),
+  /**
+   * Webhook ID of the second (subscription) webhook. Falls back to
+   * `webhookId` when omitted.
+   */
+  subscriptionWebhookId: z.string().optional(),
   includeShippingData: z.boolean().default(false),
   includeCustomerData: z.boolean().default(false),
+  autoBillOutstanding: z.boolean().optional(),
+  paymentFailureThreshold: z.number().int().positive().optional(),
 });
 
 export type PaypalPluginOptionsType = z.infer<typeof optionsSchema>;
@@ -127,6 +140,13 @@ export type PaypalPluginOptions = {
   webhookId?: string;
 
   /**
+   * Webhook ID of the second webhook dedicated to subscription events
+   * (BILLING.SUBSCRIPTION.*, PAYMENT.SALE.*). Falls back to `webhookId`.
+   * Optional.
+   */
+  subscriptionWebhookId?: string;
+
+  /**
    * Whether to include shipping data in transactions and responses.
    * Default: false
    */
@@ -143,6 +163,43 @@ type InjectedDependencies = {
   logger: Logger;
   paymentModuleService: any;
 };
+
+/**
+ * The subscription feature needs extra collaborators (our paypal_subscription
+ * module for the rows, the order module for renewal orders, the product
+ * module for variant metadata). They reach the provider cradle through the
+ * payment module's `dependencies` array in medusa-config and are optional:
+ * merchants not using subscriptions never have them registered and never pay
+ * for them.
+ */
+const SUBSCRIPTION_CRADLE_KEYS = [
+  "event_bus",
+  "paypalSubscription",
+  "order",
+  "product",
+] as const;
+
+function resolveOptionalCradleDependency(
+  container: Record<string, unknown> & {
+    hasRegistration?: (key: string) => boolean;
+    resolve?: (key: string) => unknown;
+  },
+  key: string
+): any {
+  if (!container || typeof container.hasRegistration !== "function") {
+    return undefined;
+  }
+
+  if (!container.hasRegistration(key)) {
+    return undefined;
+  }
+
+  try {
+    return container.resolve?.(key);
+  } catch {
+    return undefined;
+  }
+}
 
 type ProviderAccountHolderInput = {
   context?: {
@@ -187,6 +244,8 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
   protected client: PaypalService;
   protected logger: Logger;
   protected paymentModuleService: any;
+  protected subscriptionEngine?: SubscriptionEngine;
+  protected containerRef: Record<string, unknown>;
 
   constructor(
     container: InjectedDependencies,
@@ -196,8 +255,54 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
 
     this.logger = container.logger;
     this.paymentModuleService = container.paymentModuleService;
+    this.containerRef = container as unknown as Record<string, unknown>;
 
     this.client = new PaypalService(this.options);
+  }
+
+  /**
+   * Builds the subscription engine once, wiring whatever subscription
+   * collaborators the cradle carries. Returns undefined for installs without
+   * the `dependencies` opt-in - every subscription entry point surfaces a
+   * clear configuration error through the engine's `require` helper.
+   */
+  protected getSubscriptionEngine(): SubscriptionEngine | undefined {
+    if (this.subscriptionEngine) {
+      return this.subscriptionEngine;
+    }
+
+    const cradle = this.containerRef;
+
+    if (!cradle) {
+      return undefined;
+    }
+
+    const modules: SubscriptionEngineModules = {};
+
+    for (const key of SUBSCRIPTION_CRADLE_KEYS) {
+      modules[key as "order"] = resolveOptionalCradleDependency(
+        cradle as any,
+        key
+      );
+    }
+
+    const engineOptions: SubscriptionEngineOptions = {
+      autoBillOutstanding: this.options.autoBillOutstanding,
+      paymentFailureThreshold: this.options.paymentFailureThreshold,
+    };
+
+    this.subscriptionEngine = new SubscriptionEngine({
+      client: this.client,
+      logger: this.logger,
+      eventBus: modules["event_bus"],
+      subscriptionModule: modules["paypalSubscription"],
+      productModule: modules["product"],
+      orderModule: modules["order"],
+      paymentModule: this.paymentModuleService,
+      options: engineOptions,
+    });
+
+    return this.subscriptionEngine;
   }
 
   static validateOptions(options: PaypalPluginOptionsType): void {
@@ -220,6 +325,24 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
           MedusaError.Types.INVALID_DATA,
           "Payment data is required"
         );
+      }
+
+      // Subscription payments (first charge and renewals) are collected by
+      // PayPal on the billing agreement, not by capturing a PayPal order.
+      // Capture here is Medusa bookkeeping only.
+      const subscriptionSessionData = input.data as Record<string, unknown>;
+
+      if (
+        subscriptionSessionData.is_subscription ||
+        subscriptionSessionData.subscription_renewal
+      ) {
+        return {
+          data: {
+            ...input.data,
+            status: PaymentSessionStatus.CAPTURED,
+            captured_at: new Date().toISOString(),
+          },
+        };
       }
 
       if (!input.data.id) {
@@ -283,6 +406,47 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
 
     if (sessionData.off_session && sessionData.payment_method) {
       return this.authorizeOffSessionPayment(input);
+    }
+
+    // Renewal orders created by the subscription engine: PayPal already
+    // collected the money via the subscription, so authorization is pure
+    // bookkeeping (capturePayment short-circuits on the "captured" status
+    // the engine put in the session data).
+    if (sessionData.subscription_renewal) {
+      return {
+        status: PaymentSessionStatus.AUTHORIZED,
+        data: sessionData,
+      };
+    }
+
+    // First purchase of a subscription: authorize once the subscription is
+    // ACTIVE (with one PayPal re-query fallback), letting the standard cart
+    // completion create the first order.
+    if (sessionData.is_subscription || sessionData.paypal_subscription_id) {
+      const engine = this.getSubscriptionEngine();
+
+      if (!engine) {
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          "PayPal subscriptions are not configured. Add [\"paypalSubscription\", \"order\", \"product\"] to the payment module dependencies in medusa-config."
+        );
+      }
+
+      const result = await engine.authorizeSubscriptionSession({
+        sessionData,
+      });
+
+      if (result.status === "authorized") {
+        return {
+          status: PaymentSessionStatus.AUTHORIZED,
+          data: result.data,
+        };
+      }
+
+      return {
+        status: PaymentSessionStatus.PENDING,
+        data: result.data,
+      };
     }
 
     const data = input.data as unknown as AuthorizePaymentInputData | undefined;
@@ -467,6 +631,59 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
         };
       }
 
+      // Subscription detection: with the product module available, a cart
+      // whose items carry `paypal_subscription` metadata takes the
+      // subscription branch (PayPal Billing subscription instead of an
+      // order). Without the module the metadata cannot be read and checkout
+      // proceeds exactly as before - subscriptions require the opt-in.
+      const engine = this.getSubscriptionEngine();
+
+      if (engine) {
+        const detection = await engine.detectSubscriptionSession(data?.items);
+
+        if (detection.subscription && detection.variant) {
+          const sessionId = context?.idempotency_key;
+
+          if (!sessionId) {
+            throw new MedusaError(
+              MedusaError.Types.INVALID_DATA,
+              "PayPal subscription checkout requires a payment session id"
+            );
+          }
+
+          const initiated = await engine.initiateSubscriptionSession({
+            sessionId,
+            variantId: detection.variant.id,
+            currencyCode: currency_code,
+            email: typeof data?.email === "string" ? data.email : undefined,
+            customerId:
+              typeof sessionData.customer_id === "string"
+                ? sessionData.customer_id
+                : undefined,
+            returnUrl:
+              typeof data?.return_url === "string" ? data.return_url : undefined,
+            cancelUrl:
+              typeof data?.cancel_url === "string" ? data.cancel_url : undefined,
+          });
+
+          return {
+            id: initiated.paypalSubscriptionId,
+            data: {
+              ...data,
+              ...context,
+              amount,
+              currency_code,
+              is_subscription: true,
+              paypal_subscription_id: initiated.paypalSubscriptionId,
+              paypal_subscription_row_id: initiated.row.id,
+              // PayPal subscription approval link - same session-data key as
+              // the redirect flow, so storefronts need no changes.
+              ...(initiated.approveLink && { redirect_url: initiated.approveLink }),
+            },
+          };
+        }
+      }
+
       const order = await this.client.createOrder({
         amount: Number(amount),
         currency: currency_code,
@@ -512,6 +729,37 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
           MedusaError.Types.INVALID_DATA,
           "Payment data is required"
         );
+      }
+
+      // Subscription payments carry a PayPal sale id (renewals) or reference
+      // the subscription row (first order) instead of Orders v2 captures -
+      // refund through the sale-refund API.
+      const subscriptionSessionData = input.data as Record<string, unknown>;
+
+      if (
+        subscriptionSessionData.is_subscription ||
+        subscriptionSessionData.paypal_sale_id
+      ) {
+        const engine = this.getSubscriptionEngine();
+
+        if (!engine) {
+          throw new MedusaError(
+            MedusaError.Types.INVALID_DATA,
+            "PayPal subscriptions are not configured. Add [\"paypalSubscription\", \"order\", \"product\"] to the payment module dependencies in medusa-config."
+          );
+        }
+
+        const result = await engine.refundSubscriptionPayment(
+          subscriptionSessionData,
+          input.amount == null ? undefined : Number(input.amount)
+        );
+
+        return {
+          data: {
+            ...input.data,
+            ...(result.refundId && { paypal_refund_id: result.refundId }),
+          },
+        };
       }
 
       const orderId = input.data["id"] as string;
@@ -645,6 +893,32 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       }));
   }
 
+  /**
+   * Verifies a webhook signature against the primary webhook id, falling
+   * back to the subscription webhook id when one is configured - events
+   * delivered on the second webhook are signed with its id, so verification
+   * must try both to keep mixed topologies working.
+   */
+  private async verifyWebhookSignature(
+    headers: Record<string, string>,
+    body: object
+  ): Promise<void> {
+    try {
+      await this.client.verifyWebhook({ headers, body });
+      return;
+    } catch (error) {
+      if (!this.options.subscriptionWebhookId) {
+        throw error;
+      }
+
+      await this.client.verifyWebhook({
+        headers,
+        body,
+        webhookId: this.options.subscriptionWebhookId,
+      });
+    }
+  }
+
   async getPaymentStatus(
     input: GetPaymentStatusInput
   ): Promise<GetPaymentStatusOutput> {
@@ -654,6 +928,23 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
           MedusaError.Types.INVALID_DATA,
           "Payment data is required"
         );
+      }
+
+      // Subscription sessions have no PayPal order behind them; status is
+      // driven by the billing agreement.
+      const subscriptionSessionData = input.data as Record<string, unknown>;
+
+      if (
+        subscriptionSessionData.is_subscription ||
+        subscriptionSessionData.subscription_renewal
+      ) {
+        return {
+          status:
+            subscriptionSessionData.first_sale_id ||
+            subscriptionSessionData.paypal_sale_id
+              ? PaymentSessionStatus.CAPTURED
+              : PaymentSessionStatus.AUTHORIZED,
+        };
       }
 
       const order_id = input.data["id"] as string;
@@ -690,6 +981,26 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
     try {
       const id = input["id"] as string;
 
+      const sessionData = input as Record<string, unknown>;
+
+      // Subscription sessions reference a billing agreement, not an order.
+      if (sessionData.is_subscription || sessionData.paypal_subscription_id) {
+        const engine = this.getSubscriptionEngine();
+
+        if (!engine) {
+          throw new MedusaError(
+            MedusaError.Types.INVALID_DATA,
+            "PayPal subscriptions are not configured"
+          );
+        }
+
+        const subscriptionId =
+          (sessionData.paypal_subscription_id as string) ?? id;
+        const subscription = await this.client.getSubscription(subscriptionId);
+
+        return { data: { response: subscription } };
+      }
+
       const res = await this.client.retrieveOrder(id);
       return {
         data: { response: res },
@@ -710,7 +1021,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
     const { data, headers } = payload;
 
     try {
-      await this.client.verifyWebhook({ headers, body: data });
+      await this.verifyWebhookSignature(headers, data);
     } catch (e) {
       // Never act on events whose signature could not be verified. In
       // particular, returning action "failed" here would let an
@@ -719,6 +1030,21 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
         `PayPal webhook signature verification failed: ${String(e)}`
       );
       return { action: "not_supported" };
+    }
+
+    // Subscription-rail events (second webhook, or the standard webhook when
+    // a merchant routes everything to one): handled by the engine, which
+    // returns not_supported for everything except the first-period sale
+    // that must flow through the standard captured mechanism.
+    const engine = this.getSubscriptionEngine();
+
+    if (engine && isSubscriptionEvent(data.event_type)) {
+      const handled = await engine.handleWebhookEvent(
+        data.event_type,
+        (data as any).resource
+      );
+
+      return handled ?? { action: "not_supported" };
     }
 
     switch (data.event_type) {

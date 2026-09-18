@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-19
+
+### Added
+
+- **Official PayPal Subscriptions (Billing Subscriptions API)** as a second,
+  parallel billing path alongside vaulted renewals. Adoption is per-variant:
+  metadata key `paypal_subscription` (interval/frequency, one trial period,
+  setup fee, product type) turns a variant into a subscription product; the
+  recurring price always comes from the variant's live per-currency price.
+
+- **Plan auto-management**: PayPal products and billing plans are created on
+  demand and cached in a new `paypal_plan` table keyed by variant x currency
+  x configuration hash (plans are immutable on PayPal, so any price/config
+  change mints a new plan version automatically). Admin route
+  `POST /admin/paypal/plans/sync` for manual provisioning/inspection.
+
+- **First-purchase checkout** (`initiatePayment` subscription branch): mixed
+  subscription/regular carts are rejected with clear guidance; the PayPal
+  subscription is created with the payment session id as `custom_id`, the
+  approve link is exposed as `redirect_url`, and Buttons storefronts get the
+  idempotent get-or-create route `POST /store/paypal/subscriptions`. The
+  first order is created by the standard cart completion
+  (`authorizePayment` subscription branch); the first charge flows through
+  the standard captured mechanism via `PAYMENT.SALE.COMPLETED`. First-period
+  amount semantics (setup fee / free trial) are exposed on events, not
+  masked.
+
+- **Subscription webhook route** `POST /hooks/paypal/subscriptions` for a
+  second PayPal webhook carrying only subscription-class events
+  (`BILLING.SUBSCRIPTION.*`, `PAYMENT.SALE.*`); payment-class events are
+  acknowledged but never forwarded (no double delivery). New option
+  `subscriptionWebhookId` (falls back to `webhookId`); signature verification
+  tries both ids so mixed topologies keep working.
+
+- **Renewal orders**: every subsequent `PAYMENT.SALE.COMPLETED` creates a
+  renewal Medusa order through the injected order module - same customer,
+  first-order items at locked prices, digital (no shipping), PayPal sale id
+  stored on the payment as the refund anchor; duplicate events are
+  idempotent. Failure events increment the subscription failure counter.
+
+- **Bidirectional refund sync**: panel refunds (`PAYMENT.SALE.REFUNDED` /
+  `REVERSED`) create Medusa refunds on the matching order (full refunds auto-
+  recorded; partial refunds recorded on the subscription row), and Medusa
+  Admin refunds on subscription payments refund the PayPal sale via the new
+  provider branch (previously they errored on the Orders-v2-only structure).
+
+- **Lifecycle APIs**: admin list/detail/`cancel`/`suspend`/`resume`
+  (`/admin/paypal/subscriptions[...]`) and customer self-service
+  (`GET /store/paypal/subscriptions`,
+  `POST /store/paypal/subscriptions/:id/cancel` with ownership checks). All
+  state changes - admin, customer, inbound PayPal webhooks, or PayPal-side
+  self-service - emit `paypal.subscription.activated / suspended / resumed /
+  cancelled / expired / payment_succeeded / payment_failed` events, only on
+  actual state transitions.
+
+- **Daily reconciliation job**
+  (`paypal-subscription-reconciliation`, cron via
+  `PAYPAL_SUBSCRIPTION_RECONCILE_CRON`, default `0 3 * * *`): aligns local
+  status with PayPal, backfills missed charges by replaying the standard
+  payment workflow, and compensates customers who approved but never
+  returned to the store - all idempotent.
+
+- **New plugin module** `paypalSubscription` (tables `paypal_plan` and
+  `paypal_subscription`, first migrations shipped by the plugin - run
+  `medusa db:migrate`). To enable subscriptions, add
+  `dependencies: ["paypalSubscription", "order", "product"]` to the payment
+  module declaration in medusa-config; without it, existing behavior is
+  byte-for-byte unchanged.
+
+### Notes
+
+- The vault off-session renewal path and its contracts are unchanged.
+- Sandbox end-to-end checklist for this feature lives in
+  `.scratch/paypal-subscriptions/issues/07-sandbox-verification-and-docs.md`.
+
 ## [0.3.1] - 2026-09-10
 
 ### Fixed

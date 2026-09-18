@@ -37,6 +37,7 @@ npm list @medusajs/medusa
 - [🛠 Common Use Cases](#-common-use-cases)
 - [📦 Installation](#-installation)
 - [🔁 Vaulted Auto-Renewals](#-vaulted-auto-renewals)
+- [⭐ PayPal Subscriptions (Billing Plans)](#-paypal-subscriptions-billing-plans)
 - [⚙️ Plugin Options](#-plugin-options)
 - [📖 Documentation](#-documentation)
 
@@ -46,6 +47,7 @@ npm list @medusajs/medusa
 
 - ✅ Seamless PayPal payment integration
 - 🔁 Vaulted auto-renewals: save the buyer's PayPal wallet at checkout and charge it off-session on every billing cycle
+- ⭐ Official PayPal Subscriptions: PayPal-hosted recurring billing with automatic retries, buyer self-service, and panel refunds
 - 🔄 Handles various PayPal error states
 - 💰 Supports refunds directly from Medusa Admin
 - 🛒 Creates new order IDs for each payment attempt within the same payment intent
@@ -192,6 +194,147 @@ Vaulting is gated on the PayPal account and application:
 
 ---
 
+## ⭐ PayPal Subscriptions (Billing Plans)
+
+Besides the vault path, the plugin can run **official PayPal Subscriptions**
+(Billing Subscriptions API): the buyer approves once on PayPal, PayPal charges
+every period, retries failed charges per its own policy, and buyers can manage
+(see/cancel) the subscription inside their PayPal account. Both paths coexist -
+variants without subscription metadata behave exactly as before.
+
+### 1. Mark a variant as a subscription
+
+Set the `paypal_subscription` metadata key on the **variant**:
+
+```json
+{
+  "interval_unit": "MONTH",
+  "interval_count": 1,
+  "trial_periods": [{ "unit": "DAY", "count": 7, "price": 0 }],
+  "setup_fee": 100
+}
+```
+
+| Field            | Required | Meaning                                                                                       |
+| ---------------- | -------- | --------------------------------------------------------------------------------------------- |
+| `interval_unit`  | yes      | `DAY`, `WEEK`, `MONTH`, or `YEAR`                                                              |
+| `interval_count` | no       | Billing every N units (default `1`)                                                            |
+| `trial_periods`  | no       | One trial period (unit/count, `price` in minor units; `0` = free trial)                        |
+| `setup_fee`      | no       | One-time fee in minor units, charged at approval                                               |
+| `product_type`   | no       | PayPal product type: `SERVICE` (default), `PHYSICAL`, `DIGITAL`                                |
+
+The **price is not declared** - it comes from the variant's live price for the
+checkout currency. Only fixed-price subscriptions are supported (usage-based
+billing stays on the vault path).
+
+### 2. Enable subscription modules
+
+Add one `dependencies` line to the payment module declaration, next to the
+provider you already registered:
+
+```js
+{
+  resolve: "@medusajs/medusa/payment",
+  dependencies: ["paypalSubscription", "order", "product"], // ← enables subscriptions
+  options: { providers: [/* your paypal provider */] },
+}
+```
+
+The plugin ships a small `paypalSubscription` module (two tables:
+`paypal_plan`, `paypal_subscription`) that is registered automatically - just
+run `medusa db:migrate` after installing. Without this line nothing changes:
+regular and vault checkouts are untouched.
+
+### 3. Configure the subscription webhook
+
+Create a **second webhook** in the PayPal developer dashboard (in addition to
+your existing payment webhook) and point it at:
+
+```
+https://<your-backend>/hooks/paypal/subscriptions
+```
+
+Subscribe it to these event types only:
+
+- `BILLING.SUBSCRIPTION.ACTIVATED`
+- `BILLING.SUBSCRIPTION.SUSPENDED`
+- `BILLING.SUBSCRIPTION.CANCELLED`
+- `BILLING.SUBSCRIPTION.EXPIRED`
+- `BILLING.SUBSCRIPTION.PAYMENT.FAILED` (verify the exact type in sandbox; `PAYMENT.SALE.DENIED` is also handled)
+- `PAYMENT.SALE.COMPLETED`
+- `PAYMENT.SALE.REFUNDED`
+- `PAYMENT.SALE.REVERSED`
+
+**Do not** subscribe this webhook to `PAYMENT.CAPTURE.*` - those events belong
+to the standard Medusa payment webhook and would be delivered twice.
+
+Then pass its webhook id as `subscriptionWebhookId` (falls back to
+`webhookId` when omitted). Signature verification tries both ids, so even a
+single-webhook setup where everything is delivered to the standard endpoint
+keeps working.
+
+### 4. First purchase
+
+Both approval paths are supported and need **no storefront changes**:
+
+- **Redirect**: `initiatePayment` detects subscription items, creates the
+  PayPal subscription, and exposes the approval link as `redirect_url` in the
+  session data (`return_url` / `cancel_url` are forwarded from the session
+  data). Mixing subscription items with regular items in one cart is rejected
+  with a clear error - place subscriptions separately, one per order.
+- **Buttons (JS SDK)**: call
+  `POST /store/paypal/subscriptions` with `{ "session_id": "<payment session id>" }`
+  from the `createSubscription` callback. The route is an idempotent
+  get-or-create and returns `{ subscription: { id } }` for the SDK.
+
+The first order is created by the standard cart completion. The activation
+trigger is `BILLING.SUBSCRIPTION.ACTIVATED`; the first charge (setup fee or
+full price) arrives as `PAYMENT.SALE.COMPLETED` and flows through the standard
+captured mechanism. Customers who approve but never return to the store are
+covered: the standard workflow completes their cart from the webhook, and the
+daily reconciliation job backfills anything lost.
+
+**First-period amount semantics**: the cart total equals the full recurring
+price, but with a trial/setup fee PayPal charges only the setup fee (or `0`)
+up front. The order therefore shows a partial capture until the first regular
+charge; the actually-charged amount and currency ride on the
+`paypal.subscription.*` events.
+
+### 5. Renewals, refunds, lifecycle
+
+- **Renewals**: every later `PAYMENT.SALE.COMPLETED` creates a renewal Medusa
+  order automatically - same customer, first-order items at locked prices,
+  the PayPal sale id stored as the refund anchor.
+- **Refunds, both directions**: panel refunds (`PAYMENT.SALE.REFUNDED` /
+  `REVERSED`) sync into Medusa refunds on the matching order (full refunds are
+  auto-recorded; partial panel refunds are recorded on the subscription row
+  and surfaced via logs), and Medusa Admin refunds on renewal orders refund
+  the PayPal sale through the provider.
+- **Admin API** (auth handled by the global admin middleware):
+  - `GET /admin/paypal/subscriptions?status=ACTIVE&customer_id=&variant_id=&limit=&offset=`
+  - `GET /admin/paypal/subscriptions/:id`
+  - `POST /admin/paypal/subscriptions/:id/actions` with `{ "action": "cancel" | "suspend" | "resume" }`
+  - `POST /admin/paypal/plans/sync` with `{ "variant_id", "currency_code" }` - pre-create or inspect the cached plan
+- **Customer self-service** (customer auth):
+  - `GET /store/paypal/subscriptions` - own subscriptions
+  - `POST /store/paypal/subscriptions/:id/cancel` - cancel own subscription
+- **Events** on the Medusa event bus: `paypal.subscription.activated`,
+  `paypal.subscription.suspended`, `paypal.subscription.resumed`,
+  `paypal.subscription.cancelled`, `paypal.subscription.expired`,
+  `paypal.subscription.payment_succeeded`, `paypal.subscription.payment_failed`.
+- **Cancellation semantics** are PayPal's: future charges stop immediately,
+  paid periods keep their entitlements until period end.
+- **Reconciliation**: a daily job (cron overridable via
+  `PAYPAL_SUBSCRIPTION_RECONCILE_CRON`, default `0 3 * * *`) aligns local
+  status with PayPal and backfills missed sales / never-completed first
+  purchases idempotently.
+
+> **Note:** your PayPal business account needs the Subscriptions capability
+> enabled (verify in sandbox first - it is the first item of the release
+> checklist).
+
+---
+
 ## ⚙️ Plugin Options
 
 The following options can be passed to the PayPal plugin in your `medusa-config.js` or `medusa.config.ts` file:
@@ -202,8 +345,11 @@ The following options can be passed to the PayPal plugin in your `medusa-config.
 | `clientSecret`        | `string`  |         | Required. Your PayPal API client secret.                                                        |
 | `isSandbox`           | `boolean` | `true`  | Whether to use the PayPal Sandbox environment for testing.                                      |
 | `webhookId`           | `string`  |         | Optional. Your PayPal webhook ID. If provided, enables confirmation of payment captures.        |
+| `subscriptionWebhookId` | `string` |        | Optional. Webhook ID of the second (subscription) webhook; falls back to `webhookId`.           |
 | `includeShippingData` | `boolean` | `false` | Optional. If `true`, shipping data from the storefront order will be added to the PayPal order. |
 | `includeCustomerData` | `boolean` | `false` | Optional. If `true`, customer data from the storefront order will be added to the PayPal order. |
+| `autoBillOutstanding` | `boolean` | `true`  | Optional. Subscription plan payment preference: bill outstanding balances automatically.        |
+| `paymentFailureThreshold` | `number` | `3`  | Optional. Subscription plan payment preference: failed attempts before PayPal suspends.         |
 
 ---
 

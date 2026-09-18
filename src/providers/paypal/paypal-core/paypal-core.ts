@@ -48,6 +48,78 @@ export interface PaypalCreateOrderInput {
   cancel_url?: string;
 }
 
+/**
+ * Medusa amounts are integer minor units; PayPal billing API amounts are
+ * decimal major-unit strings. Exported because the subscription engine
+ * builds plan/charge payloads outside this class as well.
+ */
+export function toPaypalMajorAmount(minor: number): string {
+  return (minor / 100).toFixed(2);
+}
+
+export interface PaypalBillingProductInput {
+  name: string;
+  type: "SERVICE" | "PHYSICAL" | "DIGITAL";
+  description?: string;
+}
+
+export interface PaypalBillingCycleInput {
+  frequency: { interval_unit: string; interval_count: number };
+  tenure_type: "TRIAL" | "REGULAR";
+  sequence: number;
+  total_cycles: number;
+  pricing_scheme: { fixed_price: { value: string; currency_code: string } };
+  billing_preferences?: {
+    setup_fee?: { value: string; currency_code: string };
+    auto_bill_outstanding?: boolean;
+  };
+}
+
+export interface PaypalBillingPlanInput {
+  product_id: string;
+  name: string;
+  billing_cycles: PaypalBillingCycleInput[];
+  auto_bill_outstanding?: boolean;
+  payment_failure_threshold?: number;
+}
+
+export interface PaypalCreateSubscriptionInput {
+  plan_id: string;
+  custom_id: string;
+  email?: string;
+  return_url?: string;
+  cancel_url?: string;
+}
+
+export interface PaypalSubscriptionResponse {
+  id: string;
+  status: string;
+  status_update_time?: string;
+  billing_info?: {
+    next_billing_time?: string;
+    last_payment?: { time?: string; amount?: { value: string; currency_code: string } };
+    failed_payments_count?: number;
+    next_billing_amount?: { value: string; currency_code: string };
+  };
+  subscriber?: { email_address?: string; payer_id?: string };
+  links?: { rel: string; href: string; method?: string }[];
+}
+
+export interface PaypalSaleResponse {
+  id: string;
+  status: string;
+  amount?: { value: string; currency_code: string };
+  billing_agreement_id?: string;
+  custom_id?: string;
+}
+
+export interface PaypalTransactionResponse {
+  id: string;
+  status: string;
+  amount?: { value: string; currency_code: string };
+  time: string;
+}
+
 export class PaypalService {
   private client: Client;
   private ordersController: OrdersController;
@@ -148,7 +220,7 @@ export class PaypalService {
         quantity: item.quantity.toString(),
         unitAmount: {
           currencyCode: currency,
-          value: this.toMajorUnits(item.unit_price),
+          value: this.toMajorUnits(Number(item.unit_price)),
         },
       })) || [];
 
@@ -285,14 +357,184 @@ export class PaypalService {
     return refunds;
   }
 
+  /**
+   * Raw JSON request against the PayPal REST API. Used for the Billing
+   * endpoints the official SDK controllers do not cover (products, plans,
+   * subscriptions, sale refunds) - same access-token path as verifyWebhook.
+   */
+  private async billingRequest<T>(
+    method: "GET" | "POST" | "PUT" | "PATCH",
+    path: string,
+    body?: Record<string, unknown>
+  ): Promise<T> {
+    const accessToken = await this.getAccessToken();
+
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        ...(method === "POST" && { "PayPal-Request-Id": this.newRequestId() }),
+      },
+      ...(body !== undefined && { body: JSON.stringify(body) }),
+    });
+
+    const text = await response.text();
+    let data: any = undefined;
+
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = undefined;
+      }
+    }
+
+    if (!response.ok) {
+      const detail = data?.details?.[0];
+      const error = new Error(
+        `PayPal ${method} ${path} failed (${response.status}): ${
+          data?.message ?? response.statusText
+        }${detail?.issue ? ` [${detail.issue}]` : ""}`
+      ) as Error & { paypalStatus?: number; paypalIssue?: string };
+
+      error.paypalStatus = response.status;
+      error.paypalIssue = detail?.issue ?? data?.name;
+
+      throw error;
+    }
+
+    return data as T;
+  }
+
+  async createBillingProduct(
+    input: PaypalBillingProductInput
+  ): Promise<{ id: string }> {
+    return this.billingRequest<{ id: string }>("POST", "/v1/billing/products", {
+      name: input.name,
+      type: input.type,
+      ...(input.description && { description: input.description }),
+    });
+  }
+
+  async createBillingPlan(
+    input: PaypalBillingPlanInput
+  ): Promise<{ id: string }> {
+    return this.billingRequest<{ id: string }>("POST", "/v1/billing/plans", {
+      product_id: input.product_id,
+      name: input.name,
+      status: "ACTIVE",
+      billing_cycles: input.billing_cycles,
+      payment_preferences: {
+        auto_bill_outstanding: input.auto_bill_outstanding ?? true,
+        ...(input.payment_failure_threshold != null && {
+          payment_failure_threshold: input.payment_failure_threshold,
+        }),
+      },
+    });
+  }
+
+  async getBillingPlan(id: string): Promise<{ id: string; status: string }> {
+    return this.billingRequest<{ id: string; status: string }>(
+      "GET",
+      `/v1/billing/plans/${encodeURIComponent(id)}`
+    );
+  }
+
+  async createSubscription(
+    input: PaypalCreateSubscriptionInput
+  ): Promise<PaypalSubscriptionResponse> {
+    return this.billingRequest<PaypalSubscriptionResponse>(
+      "POST",
+      "/v1/billing/subscriptions",
+      {
+        plan_id: input.plan_id,
+        custom_id: input.custom_id,
+        ...(input.email && { subscriber: { email_address: input.email } }),
+        application_context: {
+          ...(input.return_url && { return_url: input.return_url }),
+          ...(input.cancel_url && { cancel_url: input.cancel_url }),
+          shipping_preference: "NO_SHIPPING",
+          user_action: "SUBSCRIBE_NOW",
+        },
+      }
+    );
+  }
+
+  async getSubscription(id: string): Promise<PaypalSubscriptionResponse> {
+    return this.billingRequest<PaypalSubscriptionResponse>(
+      "GET",
+      `/v1/billing/subscriptions/${encodeURIComponent(id)}`
+    );
+  }
+
+  async subscriptionAction(
+    id: string,
+    action: "suspend" | "activate" | "cancel",
+    reason?: string
+  ): Promise<void> {
+    await this.billingRequest<unknown>(
+      "POST",
+      `/v1/billing/subscriptions/${encodeURIComponent(id)}/${action}`,
+      { reason: reason ?? "Managed via Medusa" }
+    );
+  }
+
+  async listSubscriptionTransactions(
+    id: string,
+    startTime: string,
+    endTime: string
+  ): Promise<PaypalTransactionResponse[]> {
+    const result = await this.billingRequest<{ transactions?: PaypalTransactionResponse[] }>(
+      "GET",
+      `/v1/billing/subscriptions/${encodeURIComponent(id)}/transactions?start_time=${encodeURIComponent(
+        startTime
+      )}&end_time=${encodeURIComponent(endTime)}`
+    );
+
+    return result.transactions ?? [];
+  }
+
+  async getSale(saleId: string): Promise<PaypalSaleResponse> {
+    return this.billingRequest<PaypalSaleResponse>(
+      "GET",
+      `/v1/payments/sales/${encodeURIComponent(saleId)}`
+    );
+  }
+
+  /**
+   * Refunds a subscription-period sale (v1 sale refund, NOT the Orders v2
+   * capture refund used by refundPayment). Refunding an already fully
+   * refunded sale surfaces as paypalIssue REFUND_ISSUE_* from billingRequest.
+   */
+  async refundSale(
+    saleId: string,
+    amount?: { value: string; currency_code: string },
+    note?: string
+  ): Promise<{ id: string; status: string }> {
+    return this.billingRequest<{ id: string; status: string }>(
+      "POST",
+      `/v1/payments/sales/${encodeURIComponent(saleId)}/refund`,
+      {
+        ...(amount && { amount }),
+        ...(note && { note }),
+      }
+    );
+  }
+
   public verifyWebhook = async ({
     headers,
     body,
+    webhookId,
   }: {
     headers: Record<string, string>;
     body: object;
+    /** Overrides the configured webhook id (second-webhook topology). */
+    webhookId?: string;
   }): Promise<{ body: object; status: "SUCCESS" | "FAILURE" }> => {
-    if (!this.webhookId) {
+    const effectiveWebhookId = webhookId ?? this.webhookId;
+
+    if (!effectiveWebhookId) {
       throw new MedusaError(
         MedusaError.Types.INVALID_DATA,
         "Webhook ID is not set",
@@ -315,7 +557,7 @@ export class PaypalService {
           transmission_id: headers["paypal-transmission-id"],
           transmission_sig: headers["paypal-transmission-sig"],
           transmission_time: headers["paypal-transmission-time"],
-          webhook_id: this.webhookId,
+          webhook_id: effectiveWebhookId,
           webhook_event: body,
         }),
       },
@@ -341,7 +583,7 @@ export class PaypalService {
    * are decimal major units. A $9.90 product arrives as 990 → "9.90" here.
    */
   private toMajorUnits(minor: number): string {
-    return (minor / 100).toFixed(2);
+    return toPaypalMajorAmount(minor);
   }
 
   private newRequestId(): string {
