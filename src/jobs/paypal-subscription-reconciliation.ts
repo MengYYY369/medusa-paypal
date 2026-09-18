@@ -1,4 +1,5 @@
-import { Modules } from "@medusajs/framework/utils";
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils";
+import type { MedusaContainer } from "@medusajs/framework/types";
 
 /**
  * Daily reconciliation safety net (schedule overridable via
@@ -20,18 +21,21 @@ export const config = {
   schedule: process.env.PAYPAL_SUBSCRIPTION_RECONCILE_CRON ?? "0 3 * * *",
 };
 
-export default async function paypalSubscriptionReconciliation({
-  container,
-  logger,
-}: {
-  container: any;
-  logger: { info: (msg: string) => void; warn: (msg: string) => void };
-}) {
-  const subscriptionModule = container.resolve("paypalSubscription");
+export default async function paypalSubscriptionReconciliation(
+  container: MedusaContainer
+) {
+  // The jobs loader invokes handlers as handler(container, context) - the
+  // container is the first positional argument, never a destructured object.
+  const logger = container.resolve(ContainerRegistrationKeys.LOGGER);
 
-  if (!subscriptionModule) {
+  if (!container.hasRegistration("paypalSubscription")) {
+    logger.warn?.(
+      "paypalSubscription module is not registered - skipping reconciliation."
+    );
     return;
   }
+
+  const subscriptionModule = container.resolve<any>("paypalSubscription");
 
   const result = await subscriptionModule.reconcile({
     productModule: container.resolve(Modules.PRODUCT),

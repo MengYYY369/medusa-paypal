@@ -67,7 +67,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           provider: provider.registrationKey,
           payload: {
             data: req.body,
-            rawData: (req as any).rawData,
+            rawData: (req as any).rawBody,
             headers: req.headers,
           },
         },
