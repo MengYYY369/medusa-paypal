@@ -148,7 +148,7 @@ export class PaypalService {
         quantity: item.quantity.toString(),
         unitAmount: {
           currencyCode: currency,
-          value: item.unit_price.toString(),
+          value: this.toMajorUnits(item.unit_price),
         },
       })) || [];
 
@@ -185,12 +185,12 @@ export class PaypalService {
           {
             amount: {
               currencyCode: currency,
-              value: amount.toString(),
+              value: this.toMajorUnits(amount),
               ...(hasItems && {
                 breakdown: {
                   itemTotal: {
                     currencyCode: currency,
-                    value: amount.toString(),
+                    value: this.toMajorUnits(amount),
                   },
                 },
               }),
@@ -329,6 +329,14 @@ export class PaypalService {
 
     return { status: verifyWebhookData.verification_status, body };
   };
+
+  /**
+   * Medusa v2 exchanges amounts in integer minor units; PayPal order amounts
+   * are decimal major units. A $9.90 product arrives as 990 → "9.90" here.
+   */
+  private toMajorUnits(minor: number): string {
+    return (minor / 100).toFixed(2);
+  }
 
   private mapCustomerData({
     email,

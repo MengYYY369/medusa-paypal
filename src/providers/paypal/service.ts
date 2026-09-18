@@ -367,8 +367,10 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       );
 
       if (status === CaptureStatus.Declined) {
+        // captureData.amount.value is PayPal's major-unit string ("10.50");
+        // createOrder's contract is Medusa minor units, so scale back up.
         const newOrder = await this.client.createOrder({
-          amount: Number(captureData?.amount?.value),
+          amount: Math.round(Number(captureData?.amount?.value) * 100),
           currency: captureData?.amount?.currencyCode!,
           sessionId: input.context?.idempotency_key,
           items: data?.items,

@@ -99,14 +99,14 @@ describe("PaypalModuleService (baseline behavior)", () => {
         .mockResolvedValue({ id: "PAYPAL-1", status: "CREATED" } as never)
 
       const result = await provider.initiatePayment({
-        amount: 10.5,
+        amount: 1050,
         currency_code: "usd",
         context: { idempotency_key: "sess_1" },
         data: {},
       } as never)
 
       expect(createSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ amount: 10.5, currency: "usd" })
+        expect.objectContaining({ amount: 1050, currency: "usd" })
       )
       expect(result.id).toBe("PAYPAL-1")
       expect(result.data?.idempotency_key).toBe("sess_1")
@@ -134,7 +134,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
       const result = await provider.authorizePayment({
         data: {
           id: "ORDER-1",
-          amount: 10.5,
+          amount: 1050,
           currency_code: "usd",
           status: "APPROVED",
         },
@@ -167,7 +167,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
       const result = await provider.authorizePayment({
         data: {
           id: "ORDER-1",
-          amount: 10.5,
+          amount: 1050,
           currency_code: "usd",
           status: "APPROVED",
         },
@@ -215,6 +215,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
 
       expect(result).toMatchObject({
         action: "captured",
+        // amount comes from the PayPal webhook payload (major units).
         data: { session_id: "sess_1", amount: 10.5 },
       })
     })
@@ -255,6 +256,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
 
       expect(result).toMatchObject({
         action: "failed",
+        // amount comes from the PayPal webhook payload (major units).
         data: { session_id: "sess_1", amount: 10.5 },
       })
     })
@@ -290,7 +292,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
         .mockResolvedValue({ id: "PAYPAL-1", status: "CREATED" } as never)
 
       await provider.initiatePayment({
-        amount: 10.5,
+        amount: 1050,
         currency_code: "usd",
         context: { idempotency_key: "sess_1" },
         data: { customer_id: "cus_1" },
@@ -308,7 +310,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
         .mockResolvedValue({ id: "PAYPAL-1", status: "CREATED" } as never)
 
       await provider.initiatePayment({
-        amount: 10.5,
+        amount: 1050,
         currency_code: "usd",
         context: {},
         data: {},
@@ -340,7 +342,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
       const result = await provider.authorizePayment({
         data: {
           id: "ORDER-1",
-          amount: 10.5,
+          amount: 1050,
           currency_code: "usd",
           status: "APPROVED",
         },
@@ -358,7 +360,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
     const mitSessionData = {
       off_session: true,
       payment_method: "vault-token-1",
-      amount: 10.5,
+      amount: 1050,
       currency_code: "usd",
     }
 
@@ -369,7 +371,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
         .mockResolvedValue({ id: "SHOULD-NOT-EXIST" } as never)
 
       const result = await provider.initiatePayment({
-        amount: 10.5,
+        amount: 1050,
         currency_code: "usd",
         context: { idempotency_key: "sess_renewal" },
         data: { ...mitSessionData },
@@ -377,7 +379,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
 
       expect(createSpy).not.toHaveBeenCalled()
       expect(result.data?.payment_method).toBe("vault-token-1")
-      expect(result.data?.amount).toBe(10.5)
+      expect(result.data?.amount).toBe(1050)
       expect(result.data?.currency_code).toBe("usd")
       expect(result.data?.idempotency_key).toBe("sess_renewal")
     })
@@ -401,7 +403,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
       } as never)
 
       expect(createSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ vaultId: "vault-token-1", amount: 10.5 })
+        expect.objectContaining({ vaultId: "vault-token-1", amount: 1050 })
       )
       expect(result.status).toBe(PaymentSessionStatus.AUTHORIZED)
       expect(result.data?.id).toBe("ORDER-V")
@@ -466,7 +468,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
         } as never)
 
       const result = await provider.initiatePayment({
-        amount: 10.5,
+        amount: 1050,
         currency_code: "usd",
         context: {},
         data: {},
