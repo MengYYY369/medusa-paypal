@@ -219,6 +219,12 @@ export class PaypalService {
               },
             }),
       },
+      // Charging a vaulted token (off-session MIT) requires PayPal-Request-Id
+      // (error PAYPAL_REQUEST_ID_REQUIRED otherwise); the session id makes
+      // retries idempotent, a fresh UUID guards the no-session case.
+      ...(vaultId
+        ? { paypalRequestId: sessionId ?? this.newRequestId() }
+        : {}),
     });
 
     if (!createdOrder?.result?.id) throw new Error("Failed to create order");
@@ -336,6 +342,10 @@ export class PaypalService {
    */
   private toMajorUnits(minor: number): string {
     return (minor / 100).toFixed(2);
+  }
+
+  private newRequestId(): string {
+    return globalThis.crypto.randomUUID();
   }
 
   private mapCustomerData({

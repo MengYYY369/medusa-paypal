@@ -257,10 +257,13 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
     } catch (error) {
       this.logger.error("PayPal capture payment error:", error);
 
-      throw new MedusaError(
-        MedusaError.Types.INVALID_DATA,
-        "Failed to capture PayPal payment"
-      );
+      // Validation MedusaErrors keep their precise messages; provider/network
+      // errors map to a decline-carrying MedusaError so the renewal dunning
+      // classification can read decline_code (same contract as off-session).
+      if (error instanceof MedusaError) {
+        throw error;
+      }
+      throw this.toOffSessionFailure(error, "PayPal capture failed");
     }
   }
 
@@ -791,31 +794,15 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       );
     }
 
-    let captured: Order;
-    try {
-      captured = await this.client.captureOrder(order.id!);
-    } catch (error) {
-      throw this.toOffSessionFailure(error, "PayPal off-session capture failed");
-    }
-
-    const capture = captured.purchaseUnits?.[0]?.payments?.captures?.[0];
-
-    if (capture?.status !== CaptureStatus.Completed) {
-      throw new MedusaError(
-        MedusaError.Types.UNAUTHORIZED,
-        `PayPal off-session capture did not complete (status: ${
-          capture?.status ?? "unknown"
-        })`
-      );
-    }
-
+    // Authorize only mints the order (with the vaulted payment source). The
+    // actual capture is performed by the standard capturePayment step — the
+    // reorder renewal engine calls authorize then capture, and capturing
+    // here would make capturePayment hit ORDER_ALREADY_CAPTURED.
     return {
       status: PaymentSessionStatus.AUTHORIZED,
       data: {
         ...data,
-        ...this.withVaultReference(captured),
-        status: "COMPLETED",
-        captured_at: new Date().toISOString(),
+        ...order,
       },
     };
   }

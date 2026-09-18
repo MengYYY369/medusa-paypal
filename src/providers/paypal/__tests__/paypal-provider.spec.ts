@@ -87,7 +87,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
 
       await expect(
         provider.capturePayment({ data: {} } as never)
-      ).rejects.toThrow("Failed to capture PayPal payment")
+      ).rejects.toThrow("PayPal order ID is required to capture payment")
     })
   })
 
@@ -384,18 +384,20 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
       expect(result.data?.idempotency_key).toBe("sess_renewal")
     })
 
-    it("creates the order against the vault token and captures it", async () => {
+    it("mints the order against the vault token and captures via capturePayment", async () => {
       const provider = createProvider()
       const createSpy = jest
         .spyOn(clientOf(provider), "createOrder")
         .mockResolvedValue({ id: "ORDER-V", status: "CREATED" } as never)
-      jest.spyOn(clientOf(provider), "captureOrder").mockResolvedValue({
-        id: "ORDER-V",
-        status: "COMPLETED",
-        purchaseUnits: [
-          { payments: { captures: [{ status: "COMPLETED", id: "CAP-V" }] } },
-        ],
-      } as never)
+      const captureSpy = jest
+        .spyOn(clientOf(provider), "captureOrder")
+        .mockResolvedValue({
+          id: "ORDER-V",
+          status: "COMPLETED",
+          purchaseUnits: [
+            { payments: { captures: [{ status: "COMPLETED", id: "CAP-V" }] } },
+          ],
+        } as never)
 
       const result = await provider.authorizePayment({
         data: { ...mitSessionData },
@@ -405,17 +407,24 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
       expect(createSpy).toHaveBeenCalledWith(
         expect.objectContaining({ vaultId: "vault-token-1", amount: 1050 })
       )
+      // Authorize only mints the order; the standard capturePayment step
+      // performs the single capture (authorize-capturing would make the
+      // renewal engine's follow-up capturePayment hit ORDER_ALREADY_CAPTURED).
+      expect(captureSpy).not.toHaveBeenCalled()
       expect(result.status).toBe(PaymentSessionStatus.AUTHORIZED)
       expect(result.data?.id).toBe("ORDER-V")
-      expect(result.data?.status).toBe("COMPLETED")
-      expect(result.data?.captured_at).toBeDefined()
+      expect(result.data?.status).toBe("CREATED")
+
+      const captured = await provider.capturePayment({
+        data: result.data,
+      } as never)
+
+      expect(captureSpy).toHaveBeenCalledWith("ORDER-V")
+      expect(captured.data?.status).toBe(PaymentSessionStatus.CAPTURED)
     })
 
     it("throws a decline-carrying error when the capture is declined", async () => {
       const provider = createProvider()
-      jest
-        .spyOn(clientOf(provider), "createOrder")
-        .mockResolvedValue({ id: "ORDER-V", status: "CREATED" } as never)
       const decline = Object.assign(new Error("capture failed"), {
         body: JSON.stringify({
           name: "UNPROCESSABLE_ENTITY",
@@ -432,9 +441,8 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
         .mockRejectedValue(decline as never)
 
       await expect(
-        provider.authorizePayment({
-          data: { ...mitSessionData },
-          context: {},
+        provider.capturePayment({
+          data: { id: "ORDER-V", off_session: true },
         } as never)
       ).rejects.toThrow(/INSTRUMENT_DECLINED/)
     })
