@@ -74,4 +74,40 @@ describe("paypal-core billing endpoint paths", () => {
     const [url] = await lastFetchCall();
     expect(url).toBe(`${sandboxBase}/v1/billing/subscriptions`);
   });
+
+  it("getCapture reads /v2/payments/captures (subscription charges are captures)", async () => {
+    const client = makeClient();
+
+    await client.getCapture("CAPT-1");
+
+    const [url] = await lastFetchCall();
+    expect(url).toBe(`${sandboxBase}/v2/payments/captures/CAPT-1`);
+  });
+
+  it("refundCapture posts to /v2/payments/captures/{id}/refund", async () => {
+    const client = makeClient();
+
+    await client.refundCapture(
+      "CAPT-1",
+      { value: "1.00", currency_code: "USD" },
+      "oops"
+    );
+
+    const [url, init] = await lastFetchCall();
+    expect(url).toBe(`${sandboxBase}/v2/payments/captures/CAPT-1/refund`);
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      amount: { value: "1.00", currency_code: "USD" },
+      note_to_payer: "oops",
+    });
+  });
+
+  it("refundCapture without amount sends no amount (full remaining refund)", async () => {
+    const client = makeClient();
+
+    await client.refundCapture("CAPT-1");
+
+    const [, init] = await lastFetchCall();
+    expect(JSON.parse(String(init.body))).toEqual({});
+  });
 });

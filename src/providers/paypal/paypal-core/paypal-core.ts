@@ -113,6 +113,14 @@ export interface PaypalSaleResponse {
   custom_id?: string;
 }
 
+export interface PaypalCaptureResponse {
+  id: string;
+  status: string;
+  amount?: { value: string; currency_code: string };
+  billing_agreement_id?: string;
+  custom_id?: string;
+}
+
 export interface PaypalTransactionResponse {
   id: string;
   status: string;
@@ -520,6 +528,41 @@ export class PaypalService {
       {
         ...(amount && { amount }),
         ...(note && { note }),
+      }
+    );
+  }
+
+  /**
+   * Fetches a subscription-period charge. The current subscriptions platform
+   * records charges as Orders v2 captures even though the webhooks keep the
+   * legacy PAYMENT.SALE.* names - the ids surfaced by subscriptions
+   * transactions and webhooks resolve here (v1 sales only exist for legacy
+   * billing agreements). Refund callers should try this first and fall back
+   * to getSale on a 404.
+   */
+  async getCapture(captureId: string): Promise<PaypalCaptureResponse> {
+    return this.billingRequest<PaypalCaptureResponse>(
+      "GET",
+      `/v2/payments/captures/${encodeURIComponent(captureId)}`
+    );
+  }
+
+  /**
+   * Refunds a subscription-period charge on the v2 capture rail. Omitting
+   * the amount refunds the full remaining balance (correct after partial
+   * refunds, where the gross amount exceeds what is still refundable).
+   */
+  async refundCapture(
+    captureId: string,
+    amount?: { value: string; currency_code: string },
+    note?: string
+  ): Promise<{ id: string; status: string }> {
+    return this.billingRequest<{ id: string; status: string }>(
+      "POST",
+      `/v2/payments/captures/${encodeURIComponent(captureId)}/refund`,
+      {
+        ...(amount && { amount }),
+        ...(note && { note_to_payer: note }),
       }
     );
   }

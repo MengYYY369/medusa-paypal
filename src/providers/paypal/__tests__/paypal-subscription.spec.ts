@@ -247,12 +247,16 @@ describe("PaypalModuleService (subscription branches)", () => {
   describe("refundPayment", () => {
     it("refunds renewal payments through the recorded sale id", async () => {
       const h = createProvider()
+      const notFound = Object.assign(new Error("not found"), { paypalStatus: 404 })
       const refundSpy = jest
         .spyOn(h.clientOf(), "refundSale")
         .mockResolvedValue({ id: "ref_1", status: "COMPLETED" } as never)
       jest
         .spyOn(h.clientOf(), "getSale")
         .mockResolvedValue({ id: "sale_2", status: "COMPLETED" } as never)
+      // The current subscriptions platform records charges as v2 captures;
+      // the v1 sale rail here is the fallback path being exercised.
+      jest.spyOn(h.clientOf(), "getCapture").mockRejectedValue(notFound)
 
       const result = await h.provider.refundPayment({
         data: {

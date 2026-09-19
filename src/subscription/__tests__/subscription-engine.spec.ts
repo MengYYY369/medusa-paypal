@@ -30,6 +30,10 @@ function makeClient(overrides: Record<string, unknown> = {}) {
     listSubscriptionTransactions: jest.fn().mockResolvedValue([]),
     getSale: jest.fn().mockResolvedValue({ id: "sale_1", status: "COMPLETED" }),
     refundSale: jest.fn().mockResolvedValue({ id: "ref_1", status: "COMPLETED" }),
+    getCapture: jest
+      .fn()
+      .mockRejectedValue(Object.assign(new Error("not found"), { paypalStatus: 404 })),
+    refundCapture: jest.fn().mockResolvedValue({ id: "ref_c1", status: "COMPLETED" }),
     ...overrides,
   } as any;
 }
@@ -588,6 +592,76 @@ describe("refund (Medusa -> PayPal)", () => {
     await expect(
       h.engine.refundSubscriptionPayment({ paypal_subscription_id: "I-ABC123", is_subscription: true }, 100)
     ).rejects.toThrow(/free-trial/);
+  });
+
+  it("refunds a v2 capture charge on the capture rail (current platform)", async () => {
+    const h = makeHarness({
+      client: makeClient({
+        getCapture: jest.fn().mockResolvedValue({
+          id: "capt_1",
+          status: "COMPLETED",
+          amount: { value: "1.00", currency_code: "USD" },
+        }),
+        refundCapture: jest.fn().mockResolvedValue({ id: "ref_c1", status: "COMPLETED" }),
+      }),
+    });
+    await h.module.createPaypalSubscriptions(makeRow({ first_sale_id: "capt_1" }));
+
+    const result = await h.engine.refundSubscriptionPayment(
+      { paypal_subscription_id: "I-ABC123", is_subscription: true, currency_code: "USD" },
+      50
+    );
+
+    expect(h.client.refundCapture).toHaveBeenCalledWith(
+      "capt_1",
+      { value: "0.50", currency_code: "USD" },
+      undefined
+    );
+    expect(h.client.refundSale).not.toHaveBeenCalled();
+    expect(result.refundId).toBe("ref_c1");
+  });
+
+  it("full refund on the capture rail sends no amount (refunds remaining balance)", async () => {
+    const h = makeHarness({
+      client: makeClient({
+        getCapture: jest.fn().mockResolvedValue({
+          id: "capt_1",
+          status: "PARTIALLY_REFUNDED",
+          amount: { value: "1.00", currency_code: "USD" },
+        }),
+        refundCapture: jest.fn().mockResolvedValue({ id: "ref_c2", status: "COMPLETED" }),
+      }),
+    });
+    await h.module.createPaypalSubscriptions(makeRow({ first_sale_id: "capt_1" }));
+
+    await h.engine.refundSubscriptionPayment(
+      { paypal_subscription_id: "I-ABC123", is_subscription: true, currency_code: "USD" },
+      undefined
+    );
+
+    expect(h.client.refundCapture).toHaveBeenCalledWith("capt_1", undefined, undefined);
+  });
+
+  it("skips PayPal when the capture is already fully refunded", async () => {
+    const h = makeHarness({
+      client: makeClient({
+        getCapture: jest.fn().mockResolvedValue({
+          id: "capt_1",
+          status: "REFUNDED",
+          amount: { value: "1.00", currency_code: "USD" },
+        }),
+      }),
+    });
+    await h.module.createPaypalSubscriptions(makeRow({ first_sale_id: "capt_1" }));
+
+    const result = await h.engine.refundSubscriptionPayment(
+      { paypal_subscription_id: "I-ABC123", is_subscription: true },
+      100
+    );
+
+    expect(result.saleId).toBe("capt_1");
+    expect(h.client.refundCapture).not.toHaveBeenCalled();
+    expect(h.client.refundSale).not.toHaveBeenCalled();
   });
 });
 

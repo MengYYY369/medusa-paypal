@@ -1012,23 +1012,59 @@ export class SubscriptionEngine {
       }
     }
 
-    const sale = await client.getSale(saleId);
+    // The stored id is a v2 capture on the current subscriptions platform
+    // (charges are captures under the hood even though webhooks keep the
+    // PAYMENT.SALE.* names); fall back to the v1 sale rail for legacy ids.
+    let rail: "capture" | "sale";
+    let status: string;
+    let grossMajor = 0;
+    let railCurrency: string | undefined;
 
-    if (sale.status === "REFUNDED" || sale.status === "REVERSED") {
+    try {
+      const capture = await client.getCapture(saleId);
+      rail = "capture";
+      status = capture.status;
+      grossMajor = Number(capture.amount?.value ?? 0);
+      railCurrency = capture.amount?.currency_code;
+    } catch (error) {
+      if ((error as any)?.paypalStatus !== 404) {
+        throw error;
+      }
+
+      const sale = await client.getSale(saleId);
+      rail = "sale";
+      status = String((sale as any).state ?? sale.status);
+      grossMajor = Number(sale.amount?.value ?? 0);
+      railCurrency = sale.amount?.currency_code;
+    }
+
+    const normalizedStatus = status.toLowerCase();
+
+    if (normalizedStatus === "refunded" || normalizedStatus === "reversed") {
       return { saleId };
     }
 
-    const refundAmount = amount ?? Math.round(Number(sale.amount?.value ?? 0) * 100);
-    const currency = (data.currency_code as string) ?? sale.amount?.currency_code;
+    // No explicit amount = refund the full remaining balance at PayPal
+    // (correct after partial refunds, where gross > remaining).
+    const refundAmount =
+      amount ?? Math.round(grossMajor * 100);
+    const currency = (data.currency_code as string) ?? railCurrency;
+    const paypalAmount =
+      amount == null
+        ? undefined
+        : {
+            value: toPaypalMajorAmount(refundAmount),
+            currency_code: currency ?? "USD",
+          };
+    const note =
+      typeof data.refund_reason === "string"
+        ? (data.refund_reason as string)
+        : undefined;
 
-    const refund = await client.refundSale(
-      saleId,
-      {
-        value: toPaypalMajorAmount(refundAmount),
-        currency_code: currency ?? "USD",
-      },
-      typeof data.refund_reason === "string" ? (data.refund_reason as string) : undefined
-    );
+    const refund =
+      rail === "capture"
+        ? await client.refundCapture(saleId, paypalAmount, note)
+        : await client.refundSale(saleId, paypalAmount, note);
 
     if (data.is_subscription) {
       const row = await this.findRowBySessionData(data);
