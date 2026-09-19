@@ -410,7 +410,9 @@ export class PaypalService {
   async createBillingProduct(
     input: PaypalBillingProductInput
   ): Promise<{ id: string }> {
-    return this.billingRequest<{ id: string }>("POST", "/v1/billing/products", {
+    // Catalog Products API - products live under /v1/catalogs (plans and
+    // subscriptions are the ones under /v1/billing).
+    return this.billingRequest<{ id: string }>("POST", "/v1/catalogs/products", {
       name: input.name,
       type: input.type,
       ...(input.description && { description: input.description }),
