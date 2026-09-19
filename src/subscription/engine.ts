@@ -1216,8 +1216,10 @@ export class SubscriptionEngine {
 
     if (paymentModuleAvailable(this.deps) && orderId && amount > 0) {
       try {
+        // Payments are linked to sessions directly (payment.payment_session_id);
+        // the order entity carries no payment collection id in 2.x.
         const payments = await this.deps.paymentModule.listPayments({
-          payment_collection_id: firstOrder.payment_collection_id,
+          payment_session_id: sessionId,
         });
         const payment = payments?.[0];
 

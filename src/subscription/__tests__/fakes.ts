@@ -221,7 +221,11 @@ export function makePaymentModule() {
       },
     ]),
     listPayments: jest.fn(async (filters: any) => [
-      { id: "pay_first", payment_collection_id: filters?.payment_collection_id },
+      {
+        id: "pay_first",
+        payment_collection_id: filters?.payment_collection_id,
+        payment_session_id: filters?.payment_session_id,
+      },
     ]),
     refundPayment: jest.fn(async (input: any) => ({
       id: input.payment_id,
