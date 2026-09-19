@@ -132,6 +132,7 @@ describe("plan management", () => {
       variant,
       config: { interval_unit: "MONTH", interval_count: 1, product_type: "SERVICE" },
       currencyCode: "usd",
+      amount: 1999,
     });
 
     expect(h.client.createBillingProduct).toHaveBeenCalledTimes(1);
@@ -147,6 +148,7 @@ describe("plan management", () => {
       variant,
       config: { interval_unit: "MONTH", interval_count: 1, product_type: "SERVICE" },
       currencyCode: "usd",
+      amount: 1999,
     });
 
     expect(second.planRow.paypal_plan_id).toBe("plan_P1");
@@ -160,12 +162,14 @@ describe("plan management", () => {
       variant: makeVariant(),
       config: { interval_unit: "MONTH", interval_count: 1, product_type: "SERVICE" },
       currencyCode: "usd",
+      amount: 1999,
     });
 
     await h.engine.ensurePlan({
       variant: makeVariant({ prices: [{ currency_code: "usd", amount: 2499 }] }),
       config: { interval_unit: "MONTH", interval_count: 1, product_type: "SERVICE" },
       currencyCode: "usd",
+      amount: 2499,
     });
 
     expect(h.client.createBillingPlan).toHaveBeenCalledTimes(2);
@@ -186,6 +190,7 @@ describe("plan management", () => {
         product_type: "SERVICE",
       },
       currencyCode: "usd",
+      amount: 1999,
     });
 
     const cycles = h.client.createBillingPlan.mock.calls[0][0].billing_cycles;
@@ -265,6 +270,7 @@ describe("session initiation", () => {
       sessionId: "sess_1",
       variantId: "variant_1",
       currencyCode: "usd",
+      amount: 1999,
       customerId: "cus_1",
     });
 
@@ -284,11 +290,13 @@ describe("session initiation", () => {
       sessionId: "sess_1",
       variantId: "variant_1",
       currencyCode: "usd",
+      amount: 1999,
     });
     const second = await h.engine.initiateSubscriptionSession({
       sessionId: "sess_1",
       variantId: "variant_1",
       currencyCode: "usd",
+      amount: 1999,
     });
 
     expect(h.client.createSubscription).toHaveBeenCalledTimes(1);

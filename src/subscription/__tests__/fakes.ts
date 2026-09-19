@@ -114,12 +114,17 @@ export function makeEventBus() {
 }
 
 export function makeProductModule(variants: any[]) {
-  return {
-    listVariants: jest.fn(async (filters: any) => {
-      const ids = filters?.id;
+  const list = async (filters: any) => {
+    const ids = filters?.id;
 
-      return variants.filter((variant) => !ids || ids.includes(variant.id));
-    }),
+    return variants.filter((variant) => !ids || ids.includes(variant.id));
+  };
+
+  return {
+    // 2.20+ product modules expose listProductVariants; listVariants kept
+    // for older-version compatibility paths.
+    listProductVariants: jest.fn(list),
+    listVariants: jest.fn(list),
   };
 }
 

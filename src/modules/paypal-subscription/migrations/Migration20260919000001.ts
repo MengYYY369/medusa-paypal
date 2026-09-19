@@ -19,6 +19,7 @@ export class Migration20260919000001 extends Migration {
         "metadata" JSONB NULL,
         "created_at" TIMESTAMPTZ NOT NULL DEFAULT now(),
         "updated_at" TIMESTAMPTZ NOT NULL DEFAULT now(),
+        "deleted_at" TIMESTAMPTZ NULL,
         CONSTRAINT "paypal_plan_pkey" PRIMARY KEY ("id")
       );
 
@@ -49,6 +50,7 @@ export class Migration20260919000001 extends Migration {
         "metadata" JSONB NULL,
         "created_at" TIMESTAMPTZ NOT NULL DEFAULT now(),
         "updated_at" TIMESTAMPTZ NOT NULL DEFAULT now(),
+        "deleted_at" TIMESTAMPTZ NULL,
         CONSTRAINT "paypal_subscription_pkey" PRIMARY KEY ("id")
       );
 

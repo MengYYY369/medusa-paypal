@@ -89,8 +89,9 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
 
     const { planRow } = await engine.ensurePlan({
       variant: resolved.variant,
-      config: resolved.config,
+      config: resolved.declaration,
       currencyCode,
+      amount: resolved.amount,
     });
 
     return {
@@ -119,12 +120,13 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
   }
 
   async getOrCreateSubscriptionForSession(
-    { sessionId, email, customerId, variantId, currencyCode, returnUrl, cancelUrl }: {
+    { sessionId, email, customerId, variantId, currencyCode, amount, returnUrl, cancelUrl }: {
       sessionId: string;
       email?: string;
       customerId?: string;
       variantId: string;
       currencyCode: string;
+      amount: number;
       returnUrl?: string;
       cancelUrl?: string;
     },
@@ -134,6 +136,7 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
       sessionId,
       variantId,
       currencyCode,
+      amount,
       email,
       customerId,
       returnUrl,

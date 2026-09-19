@@ -101,6 +101,34 @@ export function isSubscriptionEvent(eventType: string): boolean {
   );
 }
 
+/**
+ * Variant listing across product module versions: 2.20+ exposes
+ * `listProductVariants` (older builds used `listVariants`). Only entity data
+ * (metadata, titles) is needed here - variant prices live in the pricing
+ * module since 2.x and are NOT a product-module entity relation, so the
+ * recurring amount always comes from the payment session, never from this
+ * listing.
+ */
+async function listVariantsByIds(
+  productModule: any,
+  variantIds: string[]
+): Promise<any[]> {
+  const list = productModule.listProductVariants ?? productModule.listVariants;
+
+  if (typeof list !== "function") {
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      "The product module dependency does not expose a variant listing method."
+    );
+  }
+
+  return (
+    (await list.call(productModule, { id: variantIds }, {
+      take: variantIds.length,
+    })) ?? []
+  );
+}
+
 export class SubscriptionEngine {
   constructor(protected deps: SubscriptionEngineDeps) {}
 
@@ -131,19 +159,18 @@ export class SubscriptionEngine {
   // -------------------------------------------------------------------------
 
   /**
-   * Fetches a variant and resolves its subscription declaration, or null when
-   * the variant is not a subscription product.
+   * Fetches a variant with its subscription declaration and the live variant
+   * price for a currency. Prices are read through the query graph (pricing
+   * module link) because they are not a product-module entity relation.
    */
   async resolveSubscriptionVariant(
     variantId: string,
     currencyCode: string
-  ): Promise<{ variant: any; config: PaypalSubscriptionConfig } | null> {
+  ): Promise<{ variant: any; declaration: PaypalSubscriptionDeclaration; amount: number } | null> {
+    const query = this.require("query", "plan pricing");
     const productModule = this.require("productModule", "plan resolution");
 
-    const variants = await productModule.listVariants(
-      { id: [variantId] },
-      { relations: ["prices"], take: 1 }
-    );
+    const variants = await listVariantsByIds(productModule, [variantId]);
 
     const variant = variants?.[0];
 
@@ -154,13 +181,20 @@ export class SubscriptionEngine {
       );
     }
 
-    const config = parseSubscriptionMetadata(variant.metadata);
+    const declaration = parseSubscriptionMetadata(variant.metadata);
 
-    if (!config) {
+    if (!declaration) {
       return null;
     }
 
-    const price = (variant.prices ?? []).find(
+    const graph = await query.graph({
+      entity: "variant",
+      fields: ["id", "prices.amount", "prices.currency_code"],
+      filters: { id: [variantId] },
+    });
+
+    const priced = (graph?.data ?? []).find((v: any) => v?.id === variantId);
+    const price = (priced?.prices ?? []).find(
       (p: any) => p.currency_code === currencyCode
     );
 
@@ -173,7 +207,8 @@ export class SubscriptionEngine {
 
     return {
       variant,
-      config: { ...config, amount: price.amount, currency_code: currencyCode },
+      declaration,
+      amount: Number(price.amount),
     };
   }
 
@@ -201,10 +236,7 @@ export class SubscriptionEngine {
       return { subscription: false };
     }
 
-    const variants = await productModule.listVariants(
-      { id: variantIds },
-      { relations: ["prices"], take: variantIds.length }
-    );
+    const variants = await listVariantsByIds(productModule, variantIds);
 
     const subscriptionVariants: { variant: any; config: any }[] = [];
 
@@ -265,28 +297,20 @@ export class SubscriptionEngine {
     variant,
     config,
     currencyCode,
+    amount,
   }: {
     variant: any;
     config: PaypalSubscriptionDeclaration;
     currencyCode: string;
+    /** Minor-unit recurring price for the checkout currency. */
+    amount: number;
   }): Promise<{ planRow: any; config: PaypalSubscriptionConfig }> {
     const { client } = this.deps;
     const subscriptionModule = this.deps.subscriptionModule;
 
-    const price = (variant.prices ?? []).find(
-      (p: any) => p.currency_code === currencyCode
-    );
-
-    if (!price) {
-      throw new MedusaError(
-        MedusaError.Types.INVALID_DATA,
-        `Subscription variant ${variant.id} has no price for currency ${currencyCode}`
-      );
-    }
-
     const fullConfig: PaypalSubscriptionConfig = {
       ...config,
-      amount: price.amount,
+      amount,
       currency_code: currencyCode,
     };
 
@@ -329,7 +353,7 @@ export class SubscriptionEngine {
         this.deps.options?.paymentFailureThreshold ?? 3,
     });
 
-    const [planRow] = await subscriptionModule.createPaypalPlans({
+    const createdPlan = await subscriptionModule.createPaypalPlans({
       variant_id: variant.id,
       currency_code: currencyCode,
       paypal_product_id: productId,
@@ -337,6 +361,8 @@ export class SubscriptionEngine {
       config_hash: hash,
       status: "ACTIVE",
     });
+
+    const planRow = Array.isArray(createdPlan) ? createdPlan[0] : createdPlan;
 
     return { planRow, config: fullConfig };
   }
@@ -414,6 +440,7 @@ export class SubscriptionEngine {
     sessionId,
     variantId,
     currencyCode,
+    amount,
     email,
     customerId,
     returnUrl,
@@ -422,6 +449,8 @@ export class SubscriptionEngine {
     sessionId: string;
     variantId: string;
     currencyCode: string;
+    /** Minor-unit recurring price from the payment session (source of truth). */
+    amount: number;
     email?: string;
     customerId?: string;
     returnUrl?: string;
@@ -448,10 +477,7 @@ export class SubscriptionEngine {
     }
 
     const productModule = this.require("productModule", "checkout");
-    const variants = await productModule.listVariants(
-      { id: [variantId] },
-      { relations: ["prices"], take: 1 }
-    );
+    const variants = await listVariantsByIds(productModule, [variantId]);
     const variant = variants?.[0];
 
     if (!variant) {
@@ -474,6 +500,7 @@ export class SubscriptionEngine {
       variant,
       config: declaration,
       currencyCode,
+      amount,
     });
 
     const subscription = await client.createSubscription({
@@ -505,7 +532,7 @@ export class SubscriptionEngine {
       }
     }
 
-    const [row] = await subscriptionModule.createPaypalSubscriptions({
+    const createdRow = await subscriptionModule.createPaypalSubscriptions({
       paypal_subscription_id: subscription.id,
       paypal_plan_id: planRow.paypal_plan_id,
       variant_id: variantId,
@@ -522,6 +549,8 @@ export class SubscriptionEngine {
       refunds: [],
       metadata: { approve_link: approveLink ?? null },
     });
+
+    const row = Array.isArray(createdRow) ? createdRow[0] : createdRow;
 
     return { row: row as SubscriptionRow, paypalSubscriptionId: subscription.id, approveLink };
   }

@@ -1,5 +1,5 @@
 import { MedusaRequest, MedusaResponse } from "@medusajs/framework";
-import { Modules } from "@medusajs/framework/utils";
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils";
 import { resolveSubscriptionModule } from "../../../../lib/paypal";
 
 type SyncBody = { variant_id?: string; currency_code?: string };
@@ -22,7 +22,10 @@ export const POST = async (req: MedusaRequest<SyncBody>, res: MedusaResponse) =>
 
   const plan = await module.syncPlanForVariant(
     { variantId, currencyCode },
-    { productModule: req.scope.resolve(Modules.PRODUCT) }
+    {
+      productModule: req.scope.resolve(Modules.PRODUCT),
+      query: req.scope.resolve(ContainerRegistrationKeys.QUERY),
+    }
   );
 
   return res.status(200).json({ plan });

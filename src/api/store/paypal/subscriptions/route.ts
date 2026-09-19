@@ -102,6 +102,7 @@ export const POST = async (req: MedusaRequest<CreateBody>, res: MedusaResponse) 
       sessionId,
       variantId: detection.variant.id,
       currencyCode: session.currency_code ?? cart.currency_code,
+      amount: Number(session.amount),
       email: cart.email ?? undefined,
       customerId: cart.customer_id ?? undefined,
       returnUrl: sessionReturnUrl,

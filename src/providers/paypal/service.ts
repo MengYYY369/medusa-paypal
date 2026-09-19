@@ -182,20 +182,40 @@ const SUBSCRIPTION_CRADLE_KEYS = [
 function resolveOptionalCradleDependency(
   container: Record<string, unknown> & {
     hasRegistration?: (key: string) => boolean;
-    resolve?: (key: string) => unknown;
+    resolve?: (key: string, opts?: { allowUnregistered?: boolean }) => unknown;
   },
   key: string
 ): any {
-  if (!container || typeof container.hasRegistration !== "function") {
+  if (!container) {
     return undefined;
   }
 
-  if (!container.hasRegistration(key)) {
-    return undefined;
-  }
-
+  // Payment providers are constructed with the awilix cradle proxy, where
+  // property access IS resolution: registered keys return instances and
+  // unregistered keys throw AwilixResolutionError (container methods like
+  // hasRegistration are NOT reachable through it).
   try {
-    return container.resolve?.(key);
+    const value = container[key];
+
+    if (value !== undefined && value !== null) {
+      return value;
+    }
+  } catch {
+    // Cradle resolution failure = dependency not registered.
+    return undefined;
+  }
+
+  // A true awilix container (tests, direct construction) exposes the API.
+  try {
+    if (typeof container.hasRegistration === "function") {
+      if (!container.hasRegistration(key)) {
+        return undefined;
+      }
+
+      return container.resolve?.(key);
+    }
+
+    return container.resolve?.(key, { allowUnregistered: true });
   } catch {
     return undefined;
   }
@@ -655,6 +675,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
             sessionId,
             variantId: detection.variant.id,
             currencyCode: currency_code,
+            amount: Number(amount),
             email: typeof data?.email === "string" ? data.email : undefined,
             customerId:
               typeof sessionData.customer_id === "string"
