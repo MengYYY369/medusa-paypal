@@ -9,6 +9,7 @@ import {
   makeOrderModule,
   makePaymentModule,
   makeProductModule,
+  makeQuery,
   makeRow,
   makeVariant,
   makeWorkflowEngine,
@@ -46,6 +47,7 @@ type Harness = {
   orderModule: ReturnType<typeof makeOrderModule>;
   paymentModule: ReturnType<typeof makePaymentModule>;
   workflowEngine: ReturnType<typeof makeWorkflowEngine>;
+  query: ReturnType<typeof makeQuery>;
   engine: SubscriptionEngine;
 };
 
@@ -58,11 +60,11 @@ function makeHarness(opts: {
   const eventBus = makeEventBus();
   const client = opts.client ?? makeClient();
   const productModule = makeProductModule(opts.variants ?? [makeVariant()]);
-  const orderModule = makeOrderModule(
-    "firstOrder" in opts ? opts.firstOrder : makeFirstOrder()
-  );
+  const firstOrder = "firstOrder" in opts ? opts.firstOrder : makeFirstOrder();
+  const orderModule = makeOrderModule(firstOrder);
   const paymentModule = makePaymentModule();
   const workflowEngine = makeWorkflowEngine();
+  const query = makeQuery(firstOrder);
 
   const engine = new SubscriptionEngine({
     client,
@@ -73,6 +75,7 @@ function makeHarness(opts: {
     orderModule,
     paymentModule,
     workflowEngine,
+    query,
   });
 
   return {
@@ -83,6 +86,7 @@ function makeHarness(opts: {
     orderModule,
     paymentModule,
     workflowEngine,
+    query,
     engine,
   };
 }
@@ -636,6 +640,29 @@ describe("refund (Medusa -> PayPal)", () => {
     await h.engine.syncCaptureRefundFromPaypal(resource);
 
     expect(h.paymentModule.refundPayment).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts the webhook resource shape (custom_id field)", async () => {
+    const h = makeHarness();
+    await h.module.createPaypalSubscriptions(
+      makeRow({
+        first_sale_id: "capt_1",
+        sales: [{ sale_id: "capt_1", amount: 100, currency_code: "USD" }],
+      })
+    );
+
+    await h.engine.syncCaptureRefundFromPaypal({
+      id: "refund_1",
+      status: "COMPLETED",
+      amount: { currency_code: "USD", value: "1.00" },
+      custom_id: "sess_1",
+    });
+
+    expect(h.paymentModule.refundPayment).toHaveBeenCalledWith({
+      payment_id: "pay_first",
+      amount: 100,
+    });
+    expect(h.module.subscriptions[0].refunds).toHaveLength(1);
   });
 
   it("ignores capture refunds without a session reference", async () => {

@@ -50,6 +50,7 @@ export type SubscriptionModuleLike = {
  * configuration error only when the feature that needs it runs.
  */
 export type SubscriptionEngineModules = {
+  query?: any;
   productModule?: any;
   orderModule?: any;
   paymentModule?: any;
@@ -138,6 +139,24 @@ function firstOrSelf<T>(result: T | T[]): T {
   return Array.isArray(result) ? (result[0] as T) : (result as T);
 }
 
+/**
+ * Webhook sale/capture resources mix the legacy v1 sale shape
+ * (amount.total / amount.currency) with the payments-v2 shape
+ * (amount.value / amount.currency_code) - normalize to minor units.
+ */
+function webhookAmount(resource: any): { amount: number; currency?: string } {
+  const value =
+    resource?.amount?.total ??
+    resource?.amount?.value ??
+    resource?.amount_with_breakdown?.gross_amount?.value;
+  const currency =
+    resource?.amount?.currency ??
+    resource?.amount?.currency_code ??
+    resource?.amount_with_breakdown?.gross_amount?.currency_code;
+
+  return { amount: Math.round(Number(value ?? 0) * 100), currency };
+}
+
 function paymentModuleAvailable(deps: SubscriptionEngineDeps): boolean {
   return !!(deps as Record<string, any>).paymentModule;
 }
@@ -160,7 +179,7 @@ export class SubscriptionEngine {
     if (!module) {
       throw new MedusaError(
         MedusaError.Types.INVALID_DATA,
-        `PayPal subscriptions require the "${name}" to be available. Add ["paypalSubscription", "order", "product"] to the payment module "dependencies" in medusa-config (missing: ${name}) to enable ${feature}.`
+        `PayPal subscriptions require the "${name}" to be available. Add ["paypalSubscription", "order", "product", "query"] to the payment module "dependencies" in medusa-config (missing: ${name}) to enable ${feature}.`
       );
     }
 
@@ -820,8 +839,8 @@ export class SubscriptionEngine {
       return { action: "not_supported" };
     }
 
-    const amount = Math.round(Number(resource?.amount?.value ?? 0) * 100);
-    const currencyCode = resource?.amount?.currency_code ?? row.currency_code;
+    const { amount, currency } = webhookAmount(resource);
+    const currencyCode = currency ?? row.currency_code;
     const billedAt = resource?.time ?? resource?.create_time ?? new Date().toISOString();
 
     if (!row.first_sale_id) {
@@ -998,12 +1017,16 @@ export class SubscriptionEngine {
    * subscription row -> payment session -> payment collection -> order.
    */
   async resolveFirstOrder(row: SubscriptionRow): Promise<any | null> {
-    const paymentModule = this.require("paymentModule", "order resolution");
+    const query = this.require("query", "order resolution");
     const orderModule = this.require("orderModule", "order resolution");
 
+    // The order table has no payment_collection_id column - orders link to
+    // payment collections through the order_payment_collection link, which
+    // is only reachable via the query graph.
     let collectionId = row.payment_collection_id;
 
     if (!collectionId) {
+      const paymentModule = this.require("paymentModule", "order resolution");
       const session = await paymentModule.retrievePaymentSession(
         row.payment_session_id
       );
@@ -1015,8 +1038,20 @@ export class SubscriptionEngine {
       return null;
     }
 
+    const links = await query.graph({
+      entity: "order_payment_collection",
+      fields: ["order_id"],
+      filters: { payment_collection_id: collectionId },
+    });
+
+    const orderId = links?.data?.[0]?.order_id;
+
+    if (!orderId) {
+      return null;
+    }
+
     const orders = await orderModule.listOrders(
-      { payment_collection_id: collectionId },
+      { id: orderId },
       { relations: ["items"], take: 1 }
     );
 
@@ -1143,7 +1178,9 @@ export class SubscriptionEngine {
   async syncCaptureRefundFromPaypal(resource: any): Promise<void> {
     const { subscriptionModule, logger } = this.deps;
 
-    const sessionId = resource?.custom;
+    // The webhook resource names the field custom_id (the REST refund object
+    // calls it custom) - accept both.
+    const sessionId = resource?.custom ?? resource?.custom_id;
     const refundId = resource?.id;
 
     if (!sessionId || !refundId) {

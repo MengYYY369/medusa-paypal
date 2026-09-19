@@ -42,6 +42,7 @@ export default async function paypalSubscriptionReconciliation(
     orderModule: container.resolve(Modules.ORDER),
     paymentModule: container.resolve(Modules.PAYMENT),
     workflowEngine: container.resolve(Modules.WORKFLOW_ENGINE),
+    query: container.resolve(ContainerRegistrationKeys.QUERY),
   });
 
   logger.info(

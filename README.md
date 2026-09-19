@@ -235,7 +235,7 @@ provider you already registered:
 ```js
 {
   resolve: "@medusajs/medusa/payment",
-  dependencies: ["paypalSubscription", "order", "product"], // ← enables subscriptions
+  dependencies: ["paypalSubscription", "order", "product", "query"], // ← enables subscriptions
   options: { providers: [/* your paypal provider */] },
 }
 ```

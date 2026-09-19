@@ -1,4 +1,4 @@
-import { PaymentWebhookEvents } from "@medusajs/framework/utils";
+import { ContainerRegistrationKeys, PaymentWebhookEvents } from "@medusajs/framework/utils";
 import { findPaypalProviderDeclaration, resolveSubscriptionModule } from "../api/lib/paypal";
 
 type WebhookEventData = {
@@ -46,6 +46,7 @@ export default async function paypalRefundSync({
   await subscriptionModule.syncCaptureRefundFromPaypal(resource, {
     paymentModule: container.resolve("payment"),
     orderModule: container.resolve("order"),
+    query: container.resolve(ContainerRegistrationKeys.QUERY),
   });
 }
 

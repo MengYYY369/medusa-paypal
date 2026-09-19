@@ -155,6 +155,16 @@ export function makeOrderModule(firstOrder: any) {
   return {
     created,
     listOrders: jest.fn(async (filters: any) => {
+      if (filters?.id) {
+        const ids = Array.isArray(filters.id) ? filters.id : [filters.id];
+
+        if (firstOrder && ids.includes(firstOrder.id)) {
+          return [firstOrder];
+        }
+
+        return created.filter((order) => ids.includes(order.id));
+      }
+
       if (filters?.payment_collection_id === "col_first") {
         return firstOrder ? [firstOrder] : [];
       }
@@ -217,6 +227,28 @@ export function makePaymentModule() {
       id: input.payment_id,
       refunded: input.amount,
     })),
+  };
+}
+
+/**
+ * Query graph fake: resolves the order_payment_collection link the way the
+ * real link module does (orders surface their payment collection through
+ * this link, not through an order-table column).
+ */
+export function makeQuery(firstOrder: any) {
+  return {
+    graph: jest.fn(async ({ entity, filters }: any) => {
+      if (entity === "order_payment_collection") {
+        const match =
+          firstOrder &&
+          (!filters?.payment_collection_id ||
+            filters.payment_collection_id === firstOrder.payment_collection_id);
+
+        return { data: match ? [{ order_id: firstOrder.id }] : [] };
+      }
+
+      return { data: [] };
+    }),
   };
 }
 
