@@ -102,6 +102,17 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
     };
   }
 
+  /**
+   * PayPal -> Medusa sync for PAYMENT.CAPTURE.REFUNDED / REVERSED webhook
+   * events (the refund event type the subscriptions platform actually fires).
+   */
+  async syncCaptureRefundFromPaypal(
+    resource: any,
+    modules: SubscriptionEngineModules = {}
+  ): Promise<void> {
+    await this.withModules(modules).syncCaptureRefundFromPaypal(resource);
+  }
+
   listPaypalPlanRows(filters?: any, config?: FindConfig<any>): Promise<any[]> {
     return (this as any).listPaypalPlans(filters, config);
   }

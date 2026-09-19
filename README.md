@@ -262,11 +262,19 @@ Subscribe it to these event types only:
 - `BILLING.SUBSCRIPTION.EXPIRED`
 - `BILLING.SUBSCRIPTION.PAYMENT.FAILED` (verify the exact type in sandbox; `PAYMENT.SALE.DENIED` is also handled)
 - `PAYMENT.SALE.COMPLETED`
-- `PAYMENT.SALE.REFUNDED`
-- `PAYMENT.SALE.REVERSED`
+- `PAYMENT.SALE.REFUNDED` / `PAYMENT.SALE.REVERSED` (fallback; see refunds below)
 
 **Do not** subscribe this webhook to `PAYMENT.CAPTURE.*` - those events belong
-to the standard Medusa payment webhook and would be delivered twice.
+to the standard Medusa payment webhook and would be delivered twice. (The
+plugin ignores any `PAYMENT.CAPTURE.*` delivered here, so a stray checkbox is
+harmless.)
+
+> **Note on the standard payment webhook:** point it at
+> `https://<your-backend>/hooks/payment/paypal` (the path segment is the
+> provider id **without** the `pp_` prefix - Medusa prepends it internally)
+> and make sure `PAYMENT.CAPTURE.REFUNDED` + `PAYMENT.CAPTURE.REVERSED` are
+> subscribed there: they are the events PayPal actually fires for panel
+> refunds of subscription charges, and they drive the refund sync.
 
 Then pass its webhook id as `subscriptionWebhookId` (falls back to
 `webhookId` when omitted). Signature verification tries both ids, so even a
@@ -305,11 +313,14 @@ charge; the actually-charged amount and currency ride on the
 - **Renewals**: every later `PAYMENT.SALE.COMPLETED` creates a renewal Medusa
   order automatically - same customer, first-order items at locked prices,
   the PayPal sale id stored as the refund anchor.
-- **Refunds, both directions**: panel refunds (`PAYMENT.SALE.REFUNDED` /
-  `REVERSED`) sync into Medusa refunds on the matching order (full refunds are
-  auto-recorded; partial panel refunds are recorded on the subscription row
-  and surfaced via logs), and Medusa Admin refunds on renewal orders refund
-  the PayPal sale through the provider.
+- **Refunds, both directions**: panel refunds of subscription charges fire
+  `PAYMENT.CAPTURE.REFUNDED` / `REVERSED` on the standard payment webhook -
+  the plugin's built-in subscriber syncs them into Medusa refunds on the
+  matching order (the refund's `custom` field carries the payment session id,
+  so full and partial refunds are both recorded). Medusa Admin refunds on
+  subscription orders refund the PayPal capture through the provider.
+  `PAYMENT.SALE.REFUNDED` / `REVERSED` (legacy billing-agreement shape) are
+  handled as a fallback.
 - **Admin API** (auth handled by the global admin middleware):
   - `GET /admin/paypal/subscriptions?status=ACTIVE&customer_id=&variant_id=&limit=&offset=`
   - `GET /admin/paypal/subscriptions/:id`

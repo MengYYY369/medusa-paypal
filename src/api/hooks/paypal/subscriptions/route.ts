@@ -64,7 +64,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       {
         name: PaymentWebhookEvents.WebhookReceived,
         data: {
-          provider: provider.registrationKey,
+          // The payment module prepends "pp_" when dispatching to the
+          // provider - the event must carry the unprefixed id.
+          provider: provider.webhookProviderId,
           payload: {
             data: req.body,
             rawData: (req as any).rawBody,

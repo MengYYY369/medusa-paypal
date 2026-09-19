@@ -593,6 +593,61 @@ describe("refund (Medusa -> PayPal)", () => {
     expect(refunded.client.refundSale).not.toHaveBeenCalled();
   });
 
+  it("syncs a capture-rail panel refund through the session reference", async () => {
+    const h = makeHarness();
+    await h.module.createPaypalSubscriptions(
+      makeRow({
+        first_sale_id: "capt_1",
+        sales: [{ sale_id: "capt_1", amount: 100, currency_code: "USD" }],
+      })
+    );
+
+    await h.engine.syncCaptureRefundFromPaypal({
+      id: "refund_1",
+      status: "COMPLETED",
+      amount: { value: "1.00", currency_code: "USD" },
+      custom: "sess_1",
+    });
+
+    expect(h.paymentModule.refundPayment).toHaveBeenCalledWith({
+      payment_id: "pay_first",
+      amount: 100,
+    });
+    expect(h.module.subscriptions[0].refunds).toEqual([
+      expect.objectContaining({ refund_id: "refund_1", order_id: "order_first" }),
+    ]);
+  });
+
+  it("is idempotent for duplicate capture refund events", async () => {
+    const h = makeHarness();
+    await h.module.createPaypalSubscriptions(
+      makeRow({
+        first_sale_id: "capt_1",
+        sales: [{ sale_id: "capt_1", amount: 100, currency_code: "USD" }],
+      })
+    );
+
+    const resource = {
+      id: "refund_1",
+      amount: { value: "1.00", currency_code: "USD" },
+      custom: "sess_1",
+    };
+    await h.engine.syncCaptureRefundFromPaypal(resource);
+    await h.engine.syncCaptureRefundFromPaypal(resource);
+
+    expect(h.paymentModule.refundPayment).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores capture refunds without a session reference", async () => {
+    const h = makeHarness();
+    await h.engine.syncCaptureRefundFromPaypal({
+      id: "refund_x",
+      amount: { value: "1.00", currency_code: "USD" },
+    });
+
+    expect(h.paymentModule.refundPayment).not.toHaveBeenCalled();
+  });
+
   it("throws a clear error when no sale exists (free trial not yet billed)", async () => {
     const h = makeHarness();
     await h.module.createPaypalSubscriptions(makeRow());
@@ -758,6 +813,32 @@ describe("reconciliation", () => {
     const result = await h.engine.reconcile();
 
     expect(result.salesBackfilled).toBe(1);
+    expect(h.module.subscriptions[0].first_sale_id).toBe("sale_missed");
+    expect(h.workflowEngine.run).toHaveBeenCalledWith("process-payment-workflow", {
+      input: { action: "captured", data: { session_id: "sess_1", amount: 100 } },
+    });
+  });
+
+  it("picks up stuck APPROVAL_PENDING rows: aligns status and backfills the missed first charge", async () => {
+    const h = makeHarness({
+      client: makeClient({
+        getSubscription: jest.fn().mockResolvedValue({
+          id: "I-ABC123",
+          status: "ACTIVE",
+          billing_info: { next_billing_time: "2026-10-19T00:00:00Z" },
+        }),
+        listSubscriptionTransactions: jest.fn().mockResolvedValue([
+          { id: "sale_missed", status: "COMPLETED", amount: { value: "1.00" }, time: "2026-09-19T00:00:00Z" },
+        ]),
+      }),
+    });
+    await h.module.createPaypalSubscriptions(makeRow({ status: "APPROVAL_PENDING" }));
+
+    const result = await h.engine.reconcile();
+
+    expect(result.aligned).toBe(1);
+    expect(result.salesBackfilled).toBe(1);
+    expect(h.module.subscriptions[0].status).toBe("ACTIVE");
     expect(h.module.subscriptions[0].first_sale_id).toBe("sale_missed");
     expect(h.workflowEngine.run).toHaveBeenCalledWith("process-payment-workflow", {
       input: { action: "captured", data: { session_id: "sess_1", amount: 100 } },

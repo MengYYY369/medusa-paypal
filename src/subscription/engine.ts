@@ -129,6 +129,19 @@ async function listVariantsByIds(
   );
 }
 
+/**
+ * MedusaService returns a single entity for object input and an array for
+ * array input - unit fakes and the real module may disagree on the shape,
+ * so callers normalize instead of assuming.
+ */
+function firstOrSelf<T>(result: T | T[]): T {
+  return Array.isArray(result) ? (result[0] as T) : (result as T);
+}
+
+function paymentModuleAvailable(deps: SubscriptionEngineDeps): boolean {
+  return !!(deps as Record<string, any>).paymentModule;
+}
+
 export class SubscriptionEngine {
   constructor(protected deps: SubscriptionEngineDeps) {}
 
@@ -362,7 +375,7 @@ export class SubscriptionEngine {
       status: "ACTIVE",
     });
 
-    const planRow = Array.isArray(createdPlan) ? createdPlan[0] : createdPlan;
+    const planRow = firstOrSelf(createdPlan);
 
     return { planRow, config: fullConfig };
   }
@@ -550,7 +563,7 @@ export class SubscriptionEngine {
       metadata: { approve_link: approveLink ?? null },
     });
 
-    const row = Array.isArray(createdRow) ? createdRow[0] : createdRow;
+    const row = firstOrSelf(createdRow);
 
     return { row: row as SubscriptionRow, paypalSubscriptionId: subscription.id, approveLink };
   }
@@ -1120,6 +1133,87 @@ export class SubscriptionEngine {
   }
 
   /**
+   * PayPal -> Medusa: records panel refunds of subscription charges made on
+   * the PayPal side. The current platform fires PAYMENT.CAPTURE.REFUNDED /
+   * REVERSED for these (not PAYMENT.SALE.REFUNDED), and the subscription's
+   * custom_id (our payment session id) is propagated onto the refund's
+   * `custom` field, which is the resolution anchor here. Works for both full
+   * and partial refunds - the refunded amount is what PayPal reports.
+   */
+  async syncCaptureRefundFromPaypal(resource: any): Promise<void> {
+    const { subscriptionModule, logger } = this.deps;
+
+    const sessionId = resource?.custom;
+    const refundId = resource?.id;
+
+    if (!sessionId || !refundId) {
+      logger.warn(
+        "Capture refund webhook without a session reference (custom); ignoring"
+      );
+      return;
+    }
+
+    const rows = (await subscriptionModule.listPaypalSubscriptions({
+      payment_session_id: sessionId,
+    })) as SubscriptionRow[];
+
+    const row = rows?.[0];
+
+    if (!row) {
+      logger.warn(
+        `Capture refund webhook for unknown session ${sessionId}; ignoring`
+      );
+      return;
+    }
+
+    if ((row.refunds ?? []).some((r) => r.refund_id === refundId)) {
+      return;
+    }
+
+    const amount = Math.round(Number(resource.amount?.value ?? 0) * 100);
+    const currencyCode =
+      resource.amount?.currency_code ?? row.currency_code;
+
+    const firstOrder = await this.resolveFirstOrderSafe(row);
+    const orderId = firstOrder?.id ?? null;
+
+    if (paymentModuleAvailable(this.deps) && orderId && amount > 0) {
+      try {
+        const payments = await this.deps.paymentModule.listPayments({
+          payment_collection_id: firstOrder.payment_collection_id,
+        });
+        const payment = payments?.[0];
+
+        if (payment?.id) {
+          await this.deps.paymentModule.refundPayment({
+            payment_id: payment.id,
+            amount,
+          });
+        }
+      } catch (error) {
+        logger.warn(
+          `Capture refund ${refundId}: could not record the Medusa refund on order ${orderId}: ${String(error)}`
+        );
+      }
+    }
+
+    await subscriptionModule.updatePaypalSubscriptions({
+      id: row.id,
+      refunds: [
+        ...(row.refunds ?? []),
+        {
+          refund_id: refundId,
+          sale_id: row.first_sale_id ?? null,
+          order_id: orderId,
+          amount,
+          currency_code: currencyCode,
+          refunded_at: new Date().toISOString(),
+        } as SubscriptionRefundRecord,
+      ],
+    });
+  }
+
+  /**
    * PayPal -> Medusa: records panel refunds against the matching order.
    * Full refunds (sale fully refunded at PayPal) create a Medusa refund on
    * the order's payment through the standard refund flow - the provider
@@ -1303,10 +1397,12 @@ export class SubscriptionEngine {
       return row;
     }
 
-    const [updated] = await this.deps.subscriptionModule.updatePaypalSubscriptions({
-      id: row.id,
-      status,
-    });
+    const updated = firstOrSelf(
+      await this.deps.subscriptionModule.updatePaypalSubscriptions({
+        id: row.id,
+        status,
+      })
+    );
 
     if (eventName) {
       await this.emitEvent(eventName, {
@@ -1334,8 +1430,10 @@ export class SubscriptionEngine {
   async reconcile(): Promise<{ aligned: number; salesBackfilled: number; firstPurchasesBackfilled: number }> {
     const { subscriptionModule, logger, client } = this.deps;
 
+    // APPROVAL_PENDING rows are included so stuck approvals (buyer approved,
+    // activation webhook lost) still converge to PayPal's state.
     const rows = (await subscriptionModule.listPaypalSubscriptions({
-      status: ["ACTIVE", "SUSPENDED"],
+      status: ["APPROVAL_PENDING", "ACTIVE", "SUSPENDED"],
     })) as SubscriptionRow[];
 
     let aligned = 0;
@@ -1411,18 +1509,56 @@ export class SubscriptionEngine {
       });
       const currentRow = (freshRows[0] ?? row) as SubscriptionRow;
 
+      // The transactions listing reports amounts under
+      // amount_with_breakdown.gross_amount (not amount) - read both shapes.
+      const grossAmountMinor = (transaction: any): number =>
+        Math.round(
+          Number(
+            transaction.amount_with_breakdown?.gross_amount?.value ??
+              transaction.amount?.value ??
+              0
+          ) * 100
+        );
+      const grossCurrency = (transaction: any): string | undefined =>
+        transaction.amount_with_breakdown?.gross_amount?.currency_code ??
+        transaction.amount?.currency_code;
+
+      // First transaction of the loop pass - even when it was recorded in a
+      // previous run, its real amount is needed to complete a first order
+      // whose workflow replay failed earlier (e.g. stored with amount 0).
+      let firstSaleAmountMinor: number | undefined;
+
       for (const transaction of transactions) {
         if (transaction.status !== "COMPLETED") {
           continue;
         }
 
-        if ((currentRow.sales ?? []).some((s) => s.sale_id === transaction.id)) {
+        const amount = grossAmountMinor(transaction);
+        const currencyCode = grossCurrency(transaction) ?? row.currency_code;
+        const billedAt = transaction.time;
+        const knownSale = (currentRow.sales ?? []).find(
+          (s) => s.sale_id === transaction.id
+        );
+
+        if (knownSale) {
+          if (transaction.id === currentRow.first_sale_id) {
+            firstSaleAmountMinor = amount;
+          }
+
+          // Heal sale records stored with a wrong amount by an earlier run.
+          if (knownSale.amount !== amount) {
+            await this.deps.subscriptionModule.updatePaypalSubscriptions({
+              id: currentRow.id,
+              sales: (currentRow.sales ?? []).map((s) =>
+                s.sale_id === transaction.id
+                  ? { ...s, amount, currency_code: currencyCode }
+                  : s
+              ),
+            });
+          }
+
           continue;
         }
-
-        const amount = Math.round(Number(transaction.amount?.value ?? 0) * 100);
-        const currencyCode = transaction.amount?.currency_code ?? row.currency_code;
-        const billedAt = transaction.time;
 
         if (!currentRow.first_sale_id) {
           await this.deps.subscriptionModule.updatePaypalSubscriptions({
@@ -1449,6 +1585,7 @@ export class SubscriptionEngine {
             row
           );
 
+          firstSaleAmountMinor = amount;
           salesBackfilled += 1;
           firstPurchasesBackfilled += 1;
         } else {
@@ -1462,15 +1599,28 @@ export class SubscriptionEngine {
         }
       }
 
-      // 3. First-purchase compensation: approved + active, but the customer
-      // never returned to the store and no charge exists yet (free trial).
-      if (row.status === "ACTIVE" && !currentRow.first_sale_id) {
+      // 3. First-purchase compensation: the subscription is active but its
+      // first order was never completed - either the customer never returned
+      // and no charge exists (free trial), or an earlier backfill recorded
+      // the sale without completing the order.
+      if (row.status === "ACTIVE") {
         const firstOrder = await this.resolveFirstOrderSafe(currentRow);
 
         if (!firstOrder) {
+          const recordedFirstSale = (currentRow.sales ?? []).find(
+            (s) => s.sale_id === currentRow.first_sale_id
+          );
+          const firstAmount =
+            firstSaleAmountMinor ?? recordedFirstSale?.amount ?? 0;
+
           await this.replayStandardPaymentWorkflow(
-            "authorized",
-            { session_id: currentRow.payment_session_id },
+            firstAmount > 0 ? "captured" : "authorized",
+            firstAmount > 0
+              ? {
+                  session_id: currentRow.payment_session_id,
+                  amount: firstAmount,
+                }
+              : { session_id: currentRow.payment_session_id },
             row
           );
 

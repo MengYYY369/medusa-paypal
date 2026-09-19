@@ -16,6 +16,12 @@ export interface PaypalProviderDeclaration {
   options: PaypalPluginOptionsType;
   /** Container registration key, e.g. "pp_paypal" or "pp_paypal_paypal". */
   registrationKey: string;
+  /**
+   * Provider id as the payment module's webhook dispatch expects it:
+   * the module prepends "pp_" itself, so this is the registration key
+   * WITHOUT the "pp_" prefix (e.g. "paypal" / "paypal_shop").
+   */
+  webhookProviderId: string;
 }
 
 /**
@@ -38,6 +44,7 @@ export function findPaypalProviderDeclaration(
         id: provider.id,
         options: provider.options,
         registrationKey: `pp_paypal${provider.id ? `_${provider.id}` : ""}`,
+        webhookProviderId: `paypal${provider.id ? `_${provider.id}` : ""}`,
       };
     }
   }
