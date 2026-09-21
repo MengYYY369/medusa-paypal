@@ -28,6 +28,8 @@ import { MedusaError } from "@medusajs/framework/utils";
 export interface PaypalCreateOrderInput {
   amount: number;
   currency: string;
+  /** Fraction digits of `currency`; PayPal rejects mis-scaled amounts. */
+  fractionDigits: number;
   sessionId?: string;
   shipping_info?: CartAddressDTO;
   items?: CartLineItemDTO[];
@@ -49,12 +51,13 @@ export interface PaypalCreateOrderInput {
 }
 
 /**
- * Medusa amounts are integer minor units; PayPal billing API amounts are
- * decimal major-unit strings. Exported because the subscription engine
- * builds plan/charge payloads outside this class as well.
+ * PayPal amounts are decimal major-unit strings written with the currency's
+ * own fraction digits. Medusa hands the provider major units too, so this is
+ * formatting only - never scale the number here. Exported because the
+ * subscription engine builds plan/charge payloads outside this class as well.
  */
-export function toPaypalMajorAmount(minor: number): string {
-  return (minor / 100).toFixed(2);
+export function formatPaypalAmount(major: number, fractionDigits: number): string {
+  return major.toFixed(fractionDigits)
 }
 
 export interface PaypalBillingProductInput {
@@ -211,6 +214,7 @@ export class PaypalService {
   async createOrder({
     amount,
     currency,
+    fractionDigits,
     sessionId,
     shipping_info,
     items,
@@ -228,7 +232,7 @@ export class PaypalService {
         quantity: item.quantity.toString(),
         unitAmount: {
           currencyCode: currency,
-          value: this.toMajorUnits(Number(item.unit_price)),
+          value: formatPaypalAmount(Number(item.unit_price), fractionDigits),
         },
       })) || [];
 
@@ -265,12 +269,12 @@ export class PaypalService {
           {
             amount: {
               currencyCode: currency,
-              value: this.toMajorUnits(amount),
+              value: formatPaypalAmount(amount, fractionDigits),
               ...(hasItems && {
                 breakdown: {
                   itemTotal: {
                     currencyCode: currency,
-                    value: this.toMajorUnits(amount),
+                    value: formatPaypalAmount(amount, fractionDigits),
                   },
                 },
               }),
@@ -622,14 +626,6 @@ export class PaypalService {
 
     return { status: verifyWebhookData.verification_status, body };
   };
-
-  /**
-   * Medusa v2 exchanges amounts in integer minor units; PayPal order amounts
-   * are decimal major units. A $9.90 product arrives as 990 → "9.90" here.
-   */
-  private toMajorUnits(minor: number): string {
-    return toPaypalMajorAmount(minor);
-  }
 
   private newRequestId(): string {
     return globalThis.crypto.randomUUID();

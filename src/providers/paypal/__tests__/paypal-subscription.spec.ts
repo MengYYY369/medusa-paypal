@@ -90,7 +90,7 @@ describe("PaypalModuleService (subscription branches)", () => {
         } as never)
 
       const result = await h.provider.initiatePayment({
-        amount: 1999,
+        amount: 19.99,
         currency_code: "usd",
         context: { idempotency_key: "sess_1" },
         data: {
@@ -130,7 +130,7 @@ describe("PaypalModuleService (subscription branches)", () => {
         .mockResolvedValue({ id: "PAYPAL-1" } as never)
 
       const result = await h.provider.initiatePayment({
-        amount: 1999,
+        amount: 19.99,
         currency_code: "usd",
         context: { idempotency_key: "sess_2" },
         data: { items: [{ variant_id: "variant_1", quantity: 1 }] },
@@ -176,7 +176,7 @@ describe("PaypalModuleService (subscription branches)", () => {
         data: {
           is_subscription: true,
           paypal_subscription_id: "I-ABC123",
-          amount: 1999,
+          amount: 19.99,
           currency_code: "usd",
         },
         context: { idempotency_key: "sess_1" },
@@ -199,7 +199,7 @@ describe("PaypalModuleService (subscription branches)", () => {
         data: {
           is_subscription: true,
           paypal_subscription_id: "I-ABC123",
-          amount: 1999,
+          amount: 19.99,
           currency_code: "usd",
         },
         context: { idempotency_key: "sess_1" },
@@ -218,7 +218,7 @@ describe("PaypalModuleService (subscription branches)", () => {
           subscription_renewal: true,
           paypal_sale_id: "sale_2",
           status: "captured",
-          amount: 1999,
+          amount: 19.99,
           currency_code: "usd",
         },
         context: {},
@@ -264,7 +264,7 @@ describe("PaypalModuleService (subscription branches)", () => {
           paypal_sale_id: "sale_2",
           currency_code: "usd",
         },
-        amount: 1999,
+        amount: 19.99,
       } as never)
 
       expect(refundSpy).toHaveBeenCalledWith(
@@ -305,7 +305,7 @@ describe("PaypalModuleService (subscription branches)", () => {
 
       expect(result).toMatchObject({
         action: "captured",
-        data: { session_id: "sess_1", amount: 100 },
+        data: { session_id: "sess_1", amount: 1 },
       })
     })
 
@@ -370,7 +370,7 @@ describe("PaypalModuleService (subscription branches)", () => {
         .mockResolvedValue({ id: "PAYPAL-1" } as never)
 
       const result = await h.provider.initiatePayment({
-        amount: 1999,
+        amount: 19.99,
         currency_code: "usd",
         context: { idempotency_key: "sess_1" },
         data: { items: [{ variant_id: "variant_1", quantity: 1 }] },

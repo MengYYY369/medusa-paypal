@@ -3,8 +3,9 @@ import { Logger, WebhookActionResult } from "@medusajs/framework/types";
 import {
   PaypalService,
   PaypalBillingCycleInput,
-  toPaypalMajorAmount,
+  formatPaypalAmount,
 } from "../providers/paypal/paypal-core/paypal-core";
+import { getPaypalFractionDigits } from "../lib/currency-digits";
 import {
   parseSubscriptionMetadata,
   planConfigHash,
@@ -142,7 +143,8 @@ function firstOrSelf<T>(result: T | T[]): T {
 /**
  * Webhook sale/capture resources mix the legacy v1 sale shape
  * (amount.total / amount.currency) with the payments-v2 shape
- * (amount.value / amount.currency_code) - normalize to minor units.
+ * (amount.value / amount.currency_code) - normalize to the major units Medusa
+ * stores, i.e. take PayPal's decimal string as-is.
  */
 function webhookAmount(resource: any): { amount: number; currency?: string } {
   const value =
@@ -154,7 +156,7 @@ function webhookAmount(resource: any): { amount: number; currency?: string } {
     resource?.amount?.currency_code ??
     resource?.amount_with_breakdown?.gross_amount?.currency_code;
 
-  return { amount: Math.round(Number(value ?? 0) * 100), currency };
+  return { amount: Number(value ?? 0), currency };
 }
 
 function paymentModuleAvailable(deps: SubscriptionEngineDeps): boolean {
@@ -334,7 +336,7 @@ export class SubscriptionEngine {
     variant: any;
     config: PaypalSubscriptionDeclaration;
     currencyCode: string;
-    /** Minor-unit recurring price for the checkout currency. */
+    /** Major-unit recurring price for the checkout currency. */
     amount: number;
   }): Promise<{ planRow: any; config: PaypalSubscriptionConfig }> {
     const { client } = this.deps;
@@ -374,7 +376,10 @@ export class SubscriptionEngine {
       productId = product.id;
     }
 
-    const cycles = this.buildBillingCycles(fullConfig);
+    const cycles = await this.buildBillingCycles(
+      fullConfig,
+      await getPaypalFractionDigits(this.deps.query, currencyCode, this.deps.logger)
+    );
 
     const plan = await client.createBillingPlan({
       product_id: productId,
@@ -399,7 +404,10 @@ export class SubscriptionEngine {
     return { planRow, config: fullConfig };
   }
 
-  private buildBillingCycles(config: PaypalSubscriptionConfig): PaypalBillingCycleInput[] {
+  private async buildBillingCycles(
+    config: PaypalSubscriptionConfig,
+    fractionDigits: number
+  ): Promise<PaypalBillingCycleInput[]> {
     const currency = config.currency_code;
     const cycles: PaypalBillingCycleInput[] = [];
     const trial = config.trial_periods?.[0];
@@ -416,14 +424,14 @@ export class SubscriptionEngine {
         total_cycles: 1,
         pricing_scheme: {
           fixed_price: {
-            value: toPaypalMajorAmount(trial.price),
+            value: formatPaypalAmount(trial.price, fractionDigits),
             currency_code: currency,
           },
         },
         ...(config.setup_fee != null && {
           billing_preferences: {
             setup_fee: {
-              value: toPaypalMajorAmount(config.setup_fee),
+              value: formatPaypalAmount(config.setup_fee, fractionDigits),
               currency_code: currency,
             },
           },
@@ -441,7 +449,7 @@ export class SubscriptionEngine {
       total_cycles: 0,
       pricing_scheme: {
         fixed_price: {
-          value: toPaypalMajorAmount(config.amount),
+          value: formatPaypalAmount(config.amount, fractionDigits),
           currency_code: currency,
         },
       },
@@ -449,7 +457,7 @@ export class SubscriptionEngine {
         config.setup_fee != null && {
           billing_preferences: {
             setup_fee: {
-              value: toPaypalMajorAmount(config.setup_fee),
+              value: formatPaypalAmount(config.setup_fee, fractionDigits),
               currency_code: currency,
             },
           },
@@ -481,7 +489,7 @@ export class SubscriptionEngine {
     sessionId: string;
     variantId: string;
     currencyCode: string;
-    /** Minor-unit recurring price from the payment session (source of truth). */
+    /** Major-unit recurring price from the payment session (source of truth). */
     amount: number;
     email?: string;
     customerId?: string;
@@ -801,7 +809,7 @@ export class SubscriptionEngine {
       customer_id: row.customer_id,
       variant_id: row.variant_id,
       payment: {
-        amount: resource?.amount ? Math.round(Number(resource.amount.value) * 100) : 0,
+        amount: Number(resource?.amount?.value ?? 0),
         currency_code: resource?.amount?.currency_code ?? row.currency_code,
         sale_id: resource?.id ?? "",
       },
@@ -1123,14 +1131,20 @@ export class SubscriptionEngine {
 
     // No explicit amount = refund the full remaining balance at PayPal
     // (correct after partial refunds, where gross > remaining).
-    const refundAmount =
-      amount ?? Math.round(grossMajor * 100);
+    const refundAmount = amount ?? grossMajor;
     const currency = (data.currency_code as string) ?? railCurrency;
     const paypalAmount =
       amount == null
         ? undefined
         : {
-            value: toPaypalMajorAmount(refundAmount),
+            value: formatPaypalAmount(
+              refundAmount,
+              await getPaypalFractionDigits(
+                this.deps.query,
+                currency ?? "USD",
+                this.deps.logger
+              )
+            ),
             currency_code: currency ?? "USD",
           };
     const note =
@@ -1207,7 +1221,7 @@ export class SubscriptionEngine {
       return;
     }
 
-    const amount = Math.round(Number(resource.amount?.value ?? 0) * 100);
+    const amount = Number(resource.amount?.value ?? 0);
     const currencyCode =
       resource.amount?.currency_code ?? row.currency_code;
 
@@ -1278,7 +1292,7 @@ export class SubscriptionEngine {
       return;
     }
 
-    const amount = Math.round(Number(resource?.amount?.total ?? resource?.amount?.value ?? 0) * 100);
+    const amount = Number(resource?.amount?.total ?? resource?.amount?.value ?? 0);
     const currencyCode =
       resource?.amount?.currency ?? resource?.amount?.currency_code ?? row.currency_code;
 
@@ -1550,13 +1564,11 @@ export class SubscriptionEngine {
 
       // The transactions listing reports amounts under
       // amount_with_breakdown.gross_amount (not amount) - read both shapes.
-      const grossAmountMinor = (transaction: any): number =>
-        Math.round(
-          Number(
-            transaction.amount_with_breakdown?.gross_amount?.value ??
-              transaction.amount?.value ??
-              0
-          ) * 100
+      const grossAmount = (transaction: any): number =>
+        Number(
+          transaction.amount_with_breakdown?.gross_amount?.value ??
+            transaction.amount?.value ??
+            0
         );
       const grossCurrency = (transaction: any): string | undefined =>
         transaction.amount_with_breakdown?.gross_amount?.currency_code ??
@@ -1565,14 +1577,14 @@ export class SubscriptionEngine {
       // First transaction of the loop pass - even when it was recorded in a
       // previous run, its real amount is needed to complete a first order
       // whose workflow replay failed earlier (e.g. stored with amount 0).
-      let firstSaleAmountMinor: number | undefined;
+      let firstSaleAmount: number | undefined;
 
       for (const transaction of transactions) {
         if (transaction.status !== "COMPLETED") {
           continue;
         }
 
-        const amount = grossAmountMinor(transaction);
+        const amount = grossAmount(transaction);
         const currencyCode = grossCurrency(transaction) ?? row.currency_code;
         const billedAt = transaction.time;
         const knownSale = (currentRow.sales ?? []).find(
@@ -1581,7 +1593,7 @@ export class SubscriptionEngine {
 
         if (knownSale) {
           if (transaction.id === currentRow.first_sale_id) {
-            firstSaleAmountMinor = amount;
+            firstSaleAmount = amount;
           }
 
           // Heal sale records stored with a wrong amount by an earlier run.
@@ -1624,7 +1636,7 @@ export class SubscriptionEngine {
             row
           );
 
-          firstSaleAmountMinor = amount;
+          firstSaleAmount = amount;
           salesBackfilled += 1;
           firstPurchasesBackfilled += 1;
         } else {
@@ -1650,7 +1662,7 @@ export class SubscriptionEngine {
             (s) => s.sale_id === currentRow.first_sale_id
           );
           const firstAmount =
-            firstSaleAmountMinor ?? recordedFirstSale?.amount ?? 0;
+            firstSaleAmount ?? recordedFirstSale?.amount ?? 0;
 
           await this.replayStandardPaymentWorkflow(
             firstAmount > 0 ? "captured" : "authorized",

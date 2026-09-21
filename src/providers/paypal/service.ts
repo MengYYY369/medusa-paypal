@@ -4,6 +4,10 @@ import {
   PaymentSessionStatus,
 } from "@medusajs/framework/utils";
 import {
+  getPaypalFractionDigits,
+  resolveQueryFromCradle,
+} from "../../lib/currency-digits";
+import {
   AuthorizePaymentInput,
   AuthorizePaymentOutput,
   CancelPaymentInput,
@@ -266,6 +270,8 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
   protected paymentModuleService: any;
   protected subscriptionEngine?: SubscriptionEngine;
   protected containerRef: Record<string, unknown>;
+  /** QUERY tool, reached through the awilix cradle proxy; may be absent. */
+  protected query?: unknown;
 
   constructor(
     container: InjectedDependencies,
@@ -276,6 +282,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
     this.logger = container.logger;
     this.paymentModuleService = container.paymentModuleService;
     this.containerRef = container as unknown as Record<string, unknown>;
+    this.query = resolveQueryFromCradle(container);
 
     this.client = new PaypalService(this.options);
   }
@@ -297,7 +304,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       return undefined;
     }
 
-    const modules: SubscriptionEngineModules = {};
+    const modules: SubscriptionEngineModules = { query: this.query };
 
     for (const key of SUBSCRIPTION_CRADLE_KEYS) {
       modules[key as "order"] = resolveOptionalCradleDependency(
@@ -499,6 +506,11 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
         const newOrder = await this.client.createOrder({
           amount: Number(amount),
           currency: currencyCode,
+          fractionDigits: await getPaypalFractionDigits(
+            this.query,
+            currencyCode,
+            this.logger
+          ),
           sessionId: input.context?.idempotency_key,
           items: data?.items,
           shipping_info: data?.shipping_info,
@@ -554,11 +566,16 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       );
 
       if (status === CaptureStatus.Declined) {
-        // captureData.amount.value is PayPal's major-unit string ("10.50");
-        // createOrder's contract is Medusa minor units, so scale back up.
+        // PayPal's declined capture reports the amount it was asked for
+        // ("10.50"), which is already the major-unit number createOrder takes.
         const newOrder = await this.client.createOrder({
-          amount: Math.round(Number(captureData?.amount?.value) * 100),
+          amount: Number(captureData?.amount?.value),
           currency: captureData?.amount?.currencyCode!,
+          fractionDigits: await getPaypalFractionDigits(
+            this.query,
+            captureData?.amount?.currencyCode!,
+            this.logger
+          ),
           sessionId: input.context?.idempotency_key,
           items: data?.items,
           shipping_info: data?.shipping_info,
@@ -708,6 +725,11 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       const order = await this.client.createOrder({
         amount: Number(amount),
         currency: currency_code,
+        fractionDigits: await getPaypalFractionDigits(
+          this.query,
+          currency_code,
+          this.logger
+        ),
         sessionId: context?.idempotency_key,
         items: data?.items,
         shipping_info: data?.shipping_info,
@@ -1131,6 +1153,11 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       order = await this.client.createOrder({
         amount,
         currency: currencyCode,
+        fractionDigits: await getPaypalFractionDigits(
+          this.query,
+          currencyCode,
+          this.logger
+        ),
         sessionId: input.context?.idempotency_key,
         vaultId,
       });

@@ -13,7 +13,7 @@ export function makeVariant(overrides: Record<string, unknown> = {}) {
         interval_count: 1,
       },
     },
-    prices: [{ currency_code: "usd", amount: 1999 }],
+    prices: [{ currency_code: "usd", amount: 19.99 }],
     ...overrides,
   };
 }
@@ -140,7 +140,7 @@ export function makeFirstOrder(overrides: Record<string, unknown> = {}) {
       {
         title: "Monthly Club",
         quantity: 1,
-        unit_price: 1999,
+        unit_price: 19.99,
         variant_id: "variant_1",
         product_id: "prod_1",
       },
@@ -216,7 +216,7 @@ export function makePaymentModule() {
       {
         id: "col_first",
         payments: [
-          { id: "pay_first", amount: 1999, refunds: [] },
+          { id: "pay_first", amount: 19.99, refunds: [] },
         ],
       },
     ]),
@@ -239,9 +239,20 @@ export function makePaymentModule() {
  * real link module does (orders surface their payment collection through
  * this link, not through an order-table column).
  */
-export function makeQuery(firstOrder: any) {
+export function makeQuery(
+  firstOrder: any,
+  currencies: Array<{ code: string; decimal_digits: number }> = []
+) {
   return {
     graph: jest.fn(async ({ entity, filters }: any) => {
+      if (entity === "currency") {
+        const match = currencies.find(
+          (currency) => currency.code === filters?.code
+        );
+
+        return { data: match ? [match] : [] };
+      }
+
       if (entity === "order_payment_collection") {
         const match =
           firstOrder &&
@@ -279,7 +290,7 @@ export function makeRow(overrides: Record<string, unknown> = {}) {
     payment_collection_id: "col_first",
     provider_id: "pp_paypal_paypal",
     status: "ACTIVE",
-    locked_amount: 1999,
+    locked_amount: 19.99,
     currency_code: "usd",
     interval_unit: "MONTH",
     interval_count: 1,

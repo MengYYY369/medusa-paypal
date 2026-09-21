@@ -1,5 +1,6 @@
 import { MedusaError } from "@medusajs/framework/utils";
 import { SubscriptionEngine } from "../engine";
+import { resetPaypalFractionDigitsCache } from "../../lib/currency-digits";
 import { parseSubscriptionMetadata } from "../metadata";
 import { PaypalSubscriptionEvents } from "../events";
 import {
@@ -55,6 +56,7 @@ function makeHarness(opts: {
   variants?: any[];
   firstOrder?: any;
   client?: any;
+  currencies?: Array<{ code: string; decimal_digits: number }>;
 } = {}): Harness {
   const subscriptionModule = new FakeSubscriptionModule();
   const eventBus = makeEventBus();
@@ -64,7 +66,7 @@ function makeHarness(opts: {
   const orderModule = makeOrderModule(firstOrder);
   const paymentModule = makePaymentModule();
   const workflowEngine = makeWorkflowEngine();
-  const query = makeQuery(firstOrder);
+  const query = makeQuery(firstOrder, opts.currencies);
 
   const engine = new SubscriptionEngine({
     client,
@@ -111,10 +113,10 @@ describe("subscription metadata parsing", () => {
 
   it("accepts JSON-string metadata", () => {
     const config = parseSubscriptionMetadata({
-      paypal_subscription: '{"interval_unit":"YEAR","interval_count":1,"setup_fee":500}',
+      paypal_subscription: '{"interval_unit":"YEAR","interval_count":1,"setup_fee":5}',
     });
 
-    expect(config?.setup_fee).toBe(500);
+    expect(config?.setup_fee).toBe(5);
   });
 
   it("throws a clear error for malformed declarations", () => {
@@ -128,6 +130,8 @@ describe("subscription metadata parsing", () => {
 });
 
 describe("plan management", () => {
+  beforeEach(() => resetPaypalFractionDigitsCache());
+
   it("creates product + plan on first use and caches by config hash", async () => {
     const h = makeHarness();
 
@@ -136,7 +140,7 @@ describe("plan management", () => {
       variant,
       config: { interval_unit: "MONTH", interval_count: 1, product_type: "SERVICE" },
       currencyCode: "usd",
-      amount: 1999,
+      amount: 19.99,
     });
 
     expect(h.client.createBillingProduct).toHaveBeenCalledTimes(1);
@@ -152,7 +156,7 @@ describe("plan management", () => {
       variant,
       config: { interval_unit: "MONTH", interval_count: 1, product_type: "SERVICE" },
       currencyCode: "usd",
-      amount: 1999,
+      amount: 19.99,
     });
 
     expect(second.planRow.paypal_plan_id).toBe("plan_P1");
@@ -166,14 +170,14 @@ describe("plan management", () => {
       variant: makeVariant(),
       config: { interval_unit: "MONTH", interval_count: 1, product_type: "SERVICE" },
       currencyCode: "usd",
-      amount: 1999,
+      amount: 19.99,
     });
 
     await h.engine.ensurePlan({
-      variant: makeVariant({ prices: [{ currency_code: "usd", amount: 2499 }] }),
+      variant: makeVariant({ prices: [{ currency_code: "usd", amount: 24.99 }] }),
       config: { interval_unit: "MONTH", interval_count: 1, product_type: "SERVICE" },
       currencyCode: "usd",
-      amount: 2499,
+      amount: 24.99,
     });
 
     expect(h.client.createBillingPlan).toHaveBeenCalledTimes(2);
@@ -190,11 +194,11 @@ describe("plan management", () => {
         interval_unit: "MONTH",
         interval_count: 1,
         trial_periods: [{ unit: "DAY", count: 7, price: 0 }],
-        setup_fee: 100,
+        setup_fee: 1,
         product_type: "SERVICE",
       },
       currencyCode: "usd",
-      amount: 1999,
+      amount: 19.99,
     });
 
     const cycles = h.client.createBillingPlan.mock.calls[0][0].billing_cycles;
@@ -207,6 +211,26 @@ describe("plan management", () => {
     expect(cycles[0].billing_preferences.setup_fee).toEqual({
       value: "1.00",
       currency_code: "usd",
+    });
+  });
+
+  it("formats plan amounts with the currency's own fraction digits", async () => {
+    const h = makeHarness({ currencies: [{ code: "jpy", decimal_digits: 0 }] });
+
+    await h.engine.ensurePlan({
+      variant: makeVariant({ prices: [{ currency_code: "jpy", amount: 1000 }] }),
+      config: { interval_unit: "MONTH", interval_count: 1, product_type: "SERVICE" },
+      currencyCode: "jpy",
+      amount: 1000,
+    });
+
+    const regular = h.client.createBillingPlan.mock.calls[0][0].billing_cycles.find(
+      (cycle: any) => cycle.tenure_type === "REGULAR"
+    );
+    // Zero-decimal currencies are rejected by PayPal with a ".00" suffix.
+    expect(regular.pricing_scheme.fixed_price).toEqual({
+      value: "1000",
+      currency_code: "jpy",
     });
   });
 });
@@ -274,7 +298,7 @@ describe("session initiation", () => {
       sessionId: "sess_1",
       variantId: "variant_1",
       currencyCode: "usd",
-      amount: 1999,
+      amount: 19.99,
       customerId: "cus_1",
     });
 
@@ -283,7 +307,7 @@ describe("session initiation", () => {
     );
     expect(result.row.status).toBe("APPROVAL_PENDING");
     expect(result.row.payment_session_id).toBe("sess_1");
-    expect(result.row.locked_amount).toBe(1999);
+    expect(result.row.locked_amount).toBe(19.99);
     expect(result.approveLink).toBe("https://www.paypal.com/approve");
   });
 
@@ -294,13 +318,13 @@ describe("session initiation", () => {
       sessionId: "sess_1",
       variantId: "variant_1",
       currencyCode: "usd",
-      amount: 1999,
+      amount: 19.99,
     });
     const second = await h.engine.initiateSubscriptionSession({
       sessionId: "sess_1",
       variantId: "variant_1",
       currencyCode: "usd",
-      amount: 1999,
+      amount: 19.99,
     });
 
     expect(h.client.createSubscription).toHaveBeenCalledTimes(1);
@@ -411,7 +435,7 @@ describe("webhook: first-period PAYMENT.SALE.COMPLETED", () => {
 
     expect(result).toEqual({
       action: "captured",
-      data: { session_id: "sess_1", amount: 100 },
+      data: { session_id: "sess_1", amount: 1 },
     });
     expect(h.module.subscriptions[0].first_sale_id).toBe("sale_1");
     expect(h.orderModule.createOrders).not.toHaveBeenCalled(); // cart completion owns the first order
@@ -442,7 +466,7 @@ describe("renewal orders", () => {
         status: "ACTIVE",
         first_sale_id: "sale_1",
         sales: [
-          { sale_id: "sale_1", amount: 100, currency_code: "usd", billed_at: "2026-09-19T00:00:00Z" },
+          { sale_id: "sale_1", amount: 1, currency_code: "usd", billed_at: "2026-09-19T00:00:00Z" },
         ],
       })
     );
@@ -463,7 +487,7 @@ describe("renewal orders", () => {
 
     const orderInput = h.orderModule.createOrders.mock.calls[0][0][0];
     expect(orderInput.customer_id).toBe("cus_1");
-    expect(orderInput.items[0]).toMatchObject({ title: "Monthly Club", unit_price: 1999 });
+    expect(orderInput.items[0]).toMatchObject({ title: "Monthly Club", unit_price: 19.99 });
     expect(orderInput.metadata).toMatchObject({
       paypal_subscription_id: "I-ABC123",
       paypal_sale_id: "sale_2",
@@ -511,7 +535,7 @@ describe("refund sync (PayPal -> Medusa)", () => {
     await h.module.createPaypalSubscriptions(
       makeRow({
         first_sale_id: "sale_1",
-        sales: [{ sale_id: "sale_1", amount: 1999, currency_code: "usd" }],
+        sales: [{ sale_id: "sale_1", amount: 19.99, currency_code: "usd" }],
       })
     );
 
@@ -524,7 +548,7 @@ describe("refund sync (PayPal -> Medusa)", () => {
 
     expect(h.paymentModule.refundPayment).toHaveBeenCalledWith({
       payment_id: "pay_first",
-      amount: 1999,
+      amount: 19.99,
     });
     expect(h.module.subscriptions[0].refunds).toEqual([
       expect.objectContaining({ refund_id: "ref_1", sale_id: "sale_1" }),
@@ -572,7 +596,7 @@ describe("refund (Medusa -> PayPal)", () => {
 
     const result = await h.engine.refundSubscriptionPayment(
       { paypal_subscription_id: "I-ABC123", is_subscription: true, currency_code: "usd" },
-      1999
+      19.99
     );
 
     expect(h.client.refundSale).toHaveBeenCalledWith(
@@ -591,7 +615,7 @@ describe("refund (Medusa -> PayPal)", () => {
 
     await refunded.engine.refundSubscriptionPayment(
       { paypal_subscription_id: "I-ABC123", is_subscription: true },
-      1999
+      19.99
     );
 
     expect(refunded.client.refundSale).not.toHaveBeenCalled();
@@ -602,7 +626,7 @@ describe("refund (Medusa -> PayPal)", () => {
     await h.module.createPaypalSubscriptions(
       makeRow({
         first_sale_id: "capt_1",
-        sales: [{ sale_id: "capt_1", amount: 100, currency_code: "USD" }],
+        sales: [{ sale_id: "capt_1", amount: 1, currency_code: "USD" }],
       })
     );
 
@@ -615,7 +639,7 @@ describe("refund (Medusa -> PayPal)", () => {
 
     expect(h.paymentModule.refundPayment).toHaveBeenCalledWith({
       payment_id: "pay_first",
-      amount: 100,
+      amount: 1,
     });
     expect(h.module.subscriptions[0].refunds).toEqual([
       expect.objectContaining({ refund_id: "refund_1", order_id: "order_first" }),
@@ -627,7 +651,7 @@ describe("refund (Medusa -> PayPal)", () => {
     await h.module.createPaypalSubscriptions(
       makeRow({
         first_sale_id: "capt_1",
-        sales: [{ sale_id: "capt_1", amount: 100, currency_code: "USD" }],
+        sales: [{ sale_id: "capt_1", amount: 1, currency_code: "USD" }],
       })
     );
 
@@ -647,7 +671,7 @@ describe("refund (Medusa -> PayPal)", () => {
     await h.module.createPaypalSubscriptions(
       makeRow({
         first_sale_id: "capt_1",
-        sales: [{ sale_id: "capt_1", amount: 100, currency_code: "USD" }],
+        sales: [{ sale_id: "capt_1", amount: 1, currency_code: "USD" }],
       })
     );
 
@@ -660,7 +684,7 @@ describe("refund (Medusa -> PayPal)", () => {
 
     expect(h.paymentModule.refundPayment).toHaveBeenCalledWith({
       payment_id: "pay_first",
-      amount: 100,
+      amount: 1,
     });
     expect(h.module.subscriptions[0].refunds).toHaveLength(1);
   });
@@ -680,7 +704,7 @@ describe("refund (Medusa -> PayPal)", () => {
     await h.module.createPaypalSubscriptions(makeRow());
 
     await expect(
-      h.engine.refundSubscriptionPayment({ paypal_subscription_id: "I-ABC123", is_subscription: true }, 100)
+      h.engine.refundSubscriptionPayment({ paypal_subscription_id: "I-ABC123", is_subscription: true }, 1)
     ).rejects.toThrow(/free-trial/);
   });
 
@@ -699,7 +723,7 @@ describe("refund (Medusa -> PayPal)", () => {
 
     const result = await h.engine.refundSubscriptionPayment(
       { paypal_subscription_id: "I-ABC123", is_subscription: true, currency_code: "USD" },
-      50
+      0.5
     );
 
     expect(h.client.refundCapture).toHaveBeenCalledWith(
@@ -746,7 +770,7 @@ describe("refund (Medusa -> PayPal)", () => {
 
     const result = await h.engine.refundSubscriptionPayment(
       { paypal_subscription_id: "I-ABC123", is_subscription: true },
-      100
+      1
     );
 
     expect(result.saleId).toBe("capt_1");
@@ -842,7 +866,7 @@ describe("reconciliation", () => {
     expect(result.salesBackfilled).toBe(1);
     expect(h.module.subscriptions[0].first_sale_id).toBe("sale_missed");
     expect(h.workflowEngine.run).toHaveBeenCalledWith("process-payment-workflow", {
-      input: { action: "captured", data: { session_id: "sess_1", amount: 100 } },
+      input: { action: "captured", data: { session_id: "sess_1", amount: 1 } },
     });
   });
 
@@ -868,7 +892,7 @@ describe("reconciliation", () => {
     expect(h.module.subscriptions[0].status).toBe("ACTIVE");
     expect(h.module.subscriptions[0].first_sale_id).toBe("sale_missed");
     expect(h.workflowEngine.run).toHaveBeenCalledWith("process-payment-workflow", {
-      input: { action: "captured", data: { session_id: "sess_1", amount: 100 } },
+      input: { action: "captured", data: { session_id: "sess_1", amount: 1 } },
     });
   });
 
@@ -910,7 +934,7 @@ describe("reconciliation", () => {
       makeRow({
         status: "ACTIVE",
         first_sale_id: "sale_1",
-        sales: [{ sale_id: "sale_1", amount: 100, currency_code: "usd" }],
+        sales: [{ sale_id: "sale_1", amount: 1, currency_code: "usd" }],
       })
     );
 
