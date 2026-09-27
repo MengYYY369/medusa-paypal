@@ -6,13 +6,23 @@ export const PAYPAL_SUBSCRIPTION_METADATA_KEY = "paypal_subscription";
 
 const billingUnitSchema = z.enum(["DAY", "WEEK", "MONTH", "YEAR"]);
 
+/**
+ * Money amounts are major units carrying at most the currency's own fraction
+ * digits (usd -> 9.99, jpy -> 100, kwd -> 9.999). A variant declaration is
+ * currency-agnostic, so the only ceiling enforceable here is ISO 4217's
+ * maximum of 3 digits; the exact per-currency precision is applied against the
+ * currency's `decimal_digits` when the amount is formatted for PayPal.
+ * Counts and intervals are NOT money and stay integers.
+ */
+const moneyAmountSchema = z.number().finite().min(0).multipleOf(0.001);
+
 const trialPeriodSchema = z.object({
   unit: billingUnitSchema,
   count: z.number().int().positive(),
   /**
-   * Minor-unit price charged for the trial period (0 = free trial).
+   * Major-unit price charged for the trial period (0 = free trial).
    */
-  price: z.number().int().min(0),
+  price: moneyAmountSchema,
 });
 
 /**
@@ -25,7 +35,7 @@ export const paypalSubscriptionMetadataSchema = z.object({
   interval_unit: billingUnitSchema,
   interval_count: z.number().int().positive().default(1),
   trial_periods: z.array(trialPeriodSchema).max(1).optional(),
-  setup_fee: z.number().int().min(0).optional(),
+  setup_fee: moneyAmountSchema.optional(),
   product_type: z.enum(["SERVICE", "PHYSICAL", "DIGITAL"]).default("SERVICE"),
   product_name: z.string().min(1).optional(),
 });
@@ -39,7 +49,7 @@ export type PaypalSubscriptionDeclaration = z.output<
 >;
 /** Declaration enriched with the variant price for a specific currency. */
 export type PaypalSubscriptionConfig = PaypalSubscriptionDeclaration & {
-  /** Minor-unit recurring price for a specific currency, resolved at plan time. */
+  /** Major-unit recurring price for a specific currency, resolved at plan time. */
   amount: number;
   currency_code: string;
 };

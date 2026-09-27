@@ -24,3 +24,5 @@ build
 !.yarn/versions
 
 .medusa
+# local agent issue tracker / scratch
+.scratch/

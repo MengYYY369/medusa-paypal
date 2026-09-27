@@ -37,7 +37,7 @@ export class Migration20260919000001 extends Migration {
         "payment_collection_id" TEXT NULL,
         "provider_id" TEXT NULL,
         "status" TEXT NOT NULL DEFAULT 'APPROVAL_PENDING',
-        "locked_amount" INTEGER NOT NULL,
+        "locked_amount" NUMERIC(20,6) NOT NULL,
         "currency_code" TEXT NOT NULL,
         "interval_unit" TEXT NOT NULL,
         "interval_count" INTEGER NOT NULL,

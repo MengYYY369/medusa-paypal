@@ -20,7 +20,10 @@ const PaypalSubscription = model.define("PaypalSubscription", {
   payment_collection_id: model.text().nullable(),
   provider_id: model.text().nullable(),
   status: model.text().default("APPROVAL_PENDING"),
-  /** Locked recurring price in minor units - renewals must match PayPal, not current variant price. */
+  /**
+   * Locked recurring price in major units (numeric(20,6) in the database) -
+   * renewals must match PayPal, not the current variant price.
+   */
   locked_amount: model.number(),
   currency_code: model.text(),
   interval_unit: model.text(),
