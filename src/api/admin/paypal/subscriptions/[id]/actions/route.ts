@@ -36,6 +36,31 @@ export const POST = async (req: MedusaRequest<ActionBody>, res: MedusaResponse) 
       return res.status(404).json({ error: "Subscription not found" });
     }
 
+    // PayPal rejections surface as raw fetch errors with paypalStatus /
+    // paypalIssue attached by the core client; rethrowing them falls through
+    // the framework error handler as an opaque 500. Wrap so the admin UI can
+    // show the actual rejection reason.
+    if (!(error instanceof MedusaError)) {
+      const paypalStatus = (error as any)?.paypalStatus;
+      const paypalIssue = (error as any)?.paypalIssue;
+      const extras = [
+        paypalStatus !== undefined && `HTTP ${paypalStatus}`,
+        paypalIssue && `issue ${paypalIssue}`,
+      ]
+        .filter(Boolean)
+        .join(", ");
+      const detail =
+        error instanceof Error
+          ? error.message
+          : String(error ?? "unknown error");
+
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `PayPal rejected "${action}" on subscription ${req.params.id}: ${detail}${extras ? ` (${extras})` : ""}`,
+        "paypal_rejected"
+      );
+    }
+
     throw error;
   }
 };

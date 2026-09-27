@@ -75,6 +75,8 @@ npm list @medusajs/medusa
 
 For complete documentation, visit our [PayPal Plugin Documentation](https://medusa-docs.alphabite.io/docs/category/paypal).
 
+中文从零到生产详细教程:[docs/tutorial.zh-CN.md](./docs/tutorial.zh-CN.md)
+
 ---
 
 ---
@@ -125,7 +127,7 @@ Add the plugin to your `medusa.config.ts` or `medusa-config.js`:
             options: {
               clientId: process.env.PAYPAL_CLIENT_ID,
               clientSecret: process.env.PAYPAL_CLIENT_SECRET,
-              isSandbox: process.env.PAYPAL_SANDBOX === "true",
+              isSandbox: process.env.PAYPAL_IS_SANDBOX === "true",
               webhookId: process.env.PAYPAL_WEBHOOK_ID,
               includeShippingData: false,
               includeCustomerData: false,
@@ -326,6 +328,26 @@ charge; the actually-charged amount and currency ride on the
   - `GET /admin/paypal/subscriptions/:id`
   - `POST /admin/paypal/subscriptions/:id/actions` with `{ "action": "cancel" | "suspend" | "resume" }`
   - `POST /admin/paypal/plans/sync` with `{ "variant_id", "currency_code" }` - pre-create or inspect the cached plan
+- **Admin UI** (ships with the package, no extra setup): a
+  **"PayPal Subscriptions"** entry appears in the Medusa admin sidebar (after
+  updating the plugin, rebuild the host admin - `medusa build` or restart
+  `medusa develop`).
+  - **List page**: filter by status (chips for `APPROVAL_PENDING` / `ACTIVE` /
+    `SUSPENDED` / `CANCELLED` / `EXPIRED`), paginate (newest first), and scan
+    key columns - PayPal subscription id, status badge, customer email,
+    product/variant title, locked amount + currency, billing period, next
+    billing date, failure count. Customer and product names are resolved from
+    the core admin APIs; if those lookups fail the raw ids are shown instead.
+  - **Detail page**: full fields including PayPal plan id, payment session,
+    and sales/refund history, plus the lifecycle actions:
+    - **Suspend / Resume** - reversible; a plain confirmation dialog.
+    - **Cancel subscription** - a strong red confirmation warning that the
+      action is **irreversible** (PayPal terminates the billing agreement
+      immediately; the customer keeps entitlements for periods already paid).
+      Use Suspend for a temporary stop.
+  - Amounts are shown in Medusa major units (the locked recurring price, not
+    the current catalog price). Rejections from PayPal (e.g. a status that
+    does not allow the action) surface their actual reason in the UI.
 - **Customer self-service** (customer auth):
   - `GET /store/paypal/subscriptions` - own subscriptions
   - `POST /store/paypal/subscriptions/:id/cancel` - cancel own subscription
@@ -344,6 +366,31 @@ charge; the actually-charged amount and currency ride on the
 > enabled (verify in sandbox first - it is the first item of the release
 > checklist).
 
+### 6. Item contract for purchase units
+
+The items of the checkout (`session.data.items[]`) are mapped onto PayPal
+purchase-unit items. The contract:
+
+| Field        | Type     | Required | Source                          |
+| ------------ | -------- | -------- | ------------------------------- |
+| `title`      | `string` | yes      | `item.title`                    |
+| `unit_price` | `number` | yes      | `item.unit_price` (major units) |
+| `quantity`   | `number` | yes      | `item.quantity`                 |
+
+All amounts are Medusa major units. They are formatted for PayPal with the
+currency's own `decimal_digits` as reported by the currency module (`usd` →
+`9.99`, `jpy` → `1000`); the plugin never rescales a number.
+
+A missing `title` or `unit_price` is rejected with a clear error naming the
+missing field, not a generic 500 — every item in the session must carry both,
+or the payment session will not be created.
+
+A valid item:
+
+```json
+{ "title": "Pro Plan - Monthly", "unit_price": 9.99, "quantity": 1 }
+```
+
 ---
 
 ## ⚙️ Plugin Options
@@ -361,6 +408,14 @@ The following options can be passed to the PayPal plugin in your `medusa-config.
 | `includeCustomerData` | `boolean` | `false` | Optional. If `true`, customer data from the storefront order will be added to the PayPal order. |
 | `autoBillOutstanding` | `boolean` | `true`  | Optional. Subscription plan payment preference: bill outstanding balances automatically.        |
 | `paymentFailureThreshold` | `number` | `3`  | Optional. Subscription plan payment preference: failed attempts before PayPal suspends.         |
+
+**Credential fallback**: when an option is not passed explicitly, the service
+falls back to the matching environment variable — `PAYPAL_CLIENT_ID`,
+`PAYPAL_CLIENT_SECRET`, `PAYPAL_IS_SANDBOX`, `PAYPAL_WEBHOOK_ID`,
+`PAYPAL_SUBSCRIPTION_WEBHOOK_ID` — so routes and modules that construct the
+service outside the provider container (e.g. the subscription webhook route)
+never run with empty credentials (`Basic Og==`). Explicit options always win
+over environment variables.
 
 ---
 

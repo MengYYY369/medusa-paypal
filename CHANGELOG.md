@@ -5,6 +5,111 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-27
+
+### Added
+
+- **Admin UI for PayPal subscriptions**: a built-in Medusa admin extension —
+  sidebar entry "PayPal Subscriptions", a filterable/paginated subscription
+  list (status chips for the full local status vocabulary, customer email and
+  product/variant titles enriched client-side with graceful fallback to raw
+  ids, major-unit amounts with currency, billing period, next billing date,
+  failure count) and a detail page (all fields incl. PayPal plan id, payment
+  session, sales/refund history) with suspend / resume / cancel actions.
+  Cancel carries a strong red confirmation stating the action is irreversible
+  (PayPal terminates the billing agreement); suspend/resume are reversible.
+  Shipped as part of the npm package — no extra configuration. UI copy is
+  English; no new runtime dependencies (`@medusajs/js-sdk` added as a
+  devDependency for the bundled extension only).
+
+### Changed
+
+- Admin subscription list API now sorts by `created_at DESC` by default:
+  offset pagination previously had no stable ordering, so concurrent webhook
+  writes could shuffle rows across pages (duplicates / dropped rows).
+
+### Fixed
+
+- Admin lifecycle actions (`cancel` / `suspend` / `resume`) no longer surface
+  PayPal rejections as opaque 500s: rejections are wrapped in a Medusa
+  `invalid_data` error (`code: "paypal_rejected"`) whose message carries the
+  HTTP status and PayPal issue, so the admin UI (and any API client) can show
+  the actual rejection reason. State-class no-ops still converge to success
+  idempotently (unchanged).
+
+## [Unreleased]
+
+_以下条目来自 2026-09-21/22 源码审查工单（`.scratch/source-repo-fixes/issues` #01–#07），**代码尚未实现**，读到这里请勿当作已交付行为。_
+
+### Fixed (planned #01–#04)
+
+- **deletePayment** no longer throws for subscription-type sessions (the PayPal
+  billing subscription is cancelled with an "Abandoned checkout" note, and
+  `404 INVALID_RESOURCE_ID` is swallowed as expected) or for sessions that never
+  created a PayPal order (`CANCELED` stub) — switching between payment tracks no
+  longer produces a 500. (Note: `Could not delete all payment sessions` is
+  Medusa core's wrapper text; the plugin's own throw is the missing-`data.id` one.)
+- **credential fallback**: the service constructor falls back to
+  `PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET` / `PAYPAL_IS_SANDBOX` /
+  `PAYPAL_WEBHOOK_ID` / `PAYPAL_SUBSCRIPTION_WEBHOOK_ID` when options are
+  missing (explicit options win when both are present). A
+  `resolvePaypalProviderConfig` helper serves the four sites that construct the
+  service outside the provider container.
+- **approve link**: vaulted checkouts that receive `payer-action` instead of
+  `approve` are now matched (both in `initiatePayment` and in
+  `initiateSubscriptionSession`), eliminating the silently-missing
+  `redirect_url`; the raw `links` are kept in the session data for storefronts.
+- **item contract**: missing `title` / `unit_price` (and non-numeric `quantity`)
+  raise a clear `INVALID_DATA` error naming the field instead of a generic 500.
+
+### Changed (planned #05)
+
+- **Dependencies**: `@mikro-orm/*` dev and peer dependencies from 6.4.3 to
+  exactly 6.6.14 to match the version embedded in Medusa 2.20, eliminating the
+  duplicate-copy `improper qualified name (too many dotted names)` cart 500.
+  **Not yet done — this release still declares 6.4.3.**
+
+### Added (planned #07)
+
+- Switch subscription in place via PayPal `POST /v1/billing/subscriptions/{id}/revise`
+  (same-product plan/frequency change, no cancel-then-resubscribe), a
+  `paypal.subscription.revised` event, and an R5 guard rejecting a second active
+  native subscription for the same customer × product.
+
+## [0.5.0] - 2026-09-22
+
+### Changed — BREAKING: money units
+
+- All amounts handed to PayPal are now **Medusa major units** (e.g. `9.99`),
+  formatted with the currency's own `decimal_digits` instead of a hard-coded
+  `/100`. The provider no longer rescales in either direction: the outbound
+  `÷100` (order total, purchase-unit amount, plan price/trial/setup fee,
+  refund) and the inbound `×100` (webhook capture/refund amounts) are gone, and
+  `toPaypalMajorAmount`/`toMajorUnits` are replaced by
+  `formatPaypalAmount(major, fractionDigits)` with
+  `src/lib/currency-digits.ts` resolving digits via the currency module
+  (falls back to 2 with a warning).
+- **Deployment coupling**: this version must ship in the same window as the
+  data migration `medusa-saas/scripts/money-minor-to-major.sql`. A deployment
+  that stores amounts in minor units (cents/fen) while running this code charges
+  **100× too much**; applying the SQL without this code charges 100× too little.
+  Verify one real order three ways before and after: PayPal charge = admin order
+  total = storefront display.
+- Compatibility is unchanged here: the package still declares
+  `@mikro-orm/*` **6.4.3** peers (the 6.6.14 alignment is still unreleased, see
+  `[Unreleased]`), and requires Medusa 2.20.
+
+### Fixed
+
+- Webhook-derived capture/refund amounts are no longer inflated by 100, so
+  recorded payments match the money PayPal actually moved.
+
+### Dependencies
+
+- `react` / `react-dom` added to `peerDependencies` (`^18.2.0`): admin bundles
+  that resolve a second React copy break the dashboard, so resolution is left to
+  the host app.
+
 ## [0.4.0] - 2026-09-19
 
 ### Added

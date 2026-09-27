@@ -5,6 +5,9 @@ import { resolveSubscriptionModule } from "../../../lib/paypal";
  * Admin subscription list. Auth is enforced by the global /admin middleware
  * (user bearer/session/api-key). Filters: status (csv), customer_id,
  * variant_id; pagination via limit/offset.
+ *
+ * Offset pagination needs a stable sort or concurrent webhook writes shuffle
+ * rows across pages - always pin newest-first unless a caller overrides it.
  */
 export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
   const module = resolveSubscriptionModule(req.scope);
@@ -23,6 +26,7 @@ export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
     {
       ...(query.limit && { take: Number(query.limit) }),
       ...(query.offset && { skip: Number(query.offset) }),
+      order: { created_at: "DESC" },
     }
   );
 
