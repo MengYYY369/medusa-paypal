@@ -27,6 +27,7 @@ import {
   type CustomerInfo,
   type VariantInfo,
 } from "../../../lib/enrich"
+import { friendlyError, statusLabel, t } from "../../../lib/i18n"
 
 type Action = "cancel" | "suspend" | "resume"
 
@@ -79,7 +80,7 @@ const PaypalSubscriptionDetailPage = () => {
         setVariant(undefined)
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(friendlyError(e))
       setRow(null)
     } finally {
       setLoading(false)
@@ -101,18 +102,18 @@ const PaypalSubscriptionDetailPage = () => {
       })
       toast.success(
         action === "cancel"
-          ? "Subscription cancelled"
+          ? t("toast.cancelled")
           : action === "suspend"
-            ? "Subscription suspended"
-            : "Subscription resumed"
+            ? t("toast.suspended")
+            : t("toast.resumed")
       )
       setConfirming(null)
       setShowCancelModal(false)
       await load()
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e)
+      const message = friendlyError(e)
       setActionError(message)
-      toast.error("Action failed")
+      toast.error(t("toast.actionFailed"))
     } finally {
       setPending(null)
     }
@@ -132,11 +133,11 @@ const PaypalSubscriptionDetailPage = () => {
           <div className="flex flex-col gap-y-1">
             <div className="flex items-center gap-3">
               <Heading level="h1">
-                {row?.paypal_subscription_id || "PayPal Subscription"}
+                {row?.paypal_subscription_id || t("detail.fallbackTitle")}
               </Heading>
               {row && (
                 <StatusBadge color={statusBadgeColor(row.status)}>
-                  {row.status.replace(/_/g, " ")}
+                  {statusLabel(row.status)}
                 </StatusBadge>
               )}
             </div>
@@ -146,7 +147,7 @@ const PaypalSubscriptionDetailPage = () => {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button size="small" variant="secondary" onClick={load} disabled={busy}>
-              Refresh
+              {t("common.refresh")}
             </Button>
             {canResume && (
               <Button
@@ -155,7 +156,7 @@ const PaypalSubscriptionDetailPage = () => {
                 disabled={busy}
                 onClick={() => runAction("resume")}
               >
-                {pending === "resume" ? "Resuming…" : "Resume"}
+                {pending === "resume" ? t("action.resuming") : t("action.resume")}
               </Button>
             )}
             {canSuspend && (
@@ -165,7 +166,9 @@ const PaypalSubscriptionDetailPage = () => {
                 disabled={busy}
                 onClick={() => runAction("suspend")}
               >
-                {pending === "suspend" ? "Suspending…" : "Suspend"}
+                {pending === "suspend"
+                  ? t("action.suspending")
+                  : t("action.suspend")}
               </Button>
             )}
             {canCancel && (
@@ -175,7 +178,7 @@ const PaypalSubscriptionDetailPage = () => {
                 disabled={busy}
                 onClick={() => setShowCancelModal(true)}
               >
-                Cancel subscription
+                {t("action.cancelSubscription")}
               </Button>
             )}
           </div>
@@ -192,7 +195,7 @@ const PaypalSubscriptionDetailPage = () => {
       {loading && (
         <Container className="px-6 py-4">
           <Text size="small" className="text-ui-fg-subtle">
-            Loading…
+            {t("common.loading")}
           </Text>
         </Container>
       )}
@@ -200,7 +203,7 @@ const PaypalSubscriptionDetailPage = () => {
       {!loading && error && (
         <Container className="px-6 py-4">
           <Text size="small" className="text-ui-fg-error">
-            Failed to load subscription: {error}
+            {t("detail.loadFailed")} {error}
           </Text>
         </Container>
       )}
@@ -209,16 +212,16 @@ const PaypalSubscriptionDetailPage = () => {
         <>
           <Container className="px-6 py-4">
             <Heading level="h2" className="mb-4">
-              Details
+              {t("detail.detailsHeading")}
             </Heading>
             <div className="grid grid-cols-1 gap-x-8 gap-y-4 md:grid-cols-2">
-              <Field label="PayPal subscription ID">
+              <Field label={t("field.paypalSubscriptionId")}>
                 <span className="font-mono">{row.paypal_subscription_id || "—"}</span>
               </Field>
-              <Field label="PayPal plan ID">
+              <Field label={t("field.paypalPlanId")}>
                 <span className="font-mono">{row.paypal_plan_id || "—"}</span>
               </Field>
-              <Field label="Customer">
+              <Field label={t("field.customer")}>
                 {customerLabel(customer) ? (
                   <>
                     {customerLabel(customer)}
@@ -231,7 +234,7 @@ const PaypalSubscriptionDetailPage = () => {
                   <span className="font-mono">{row.customer_id || "—"}</span>
                 )}
               </Field>
-              <Field label="Variant">
+              <Field label={t("field.variant")}>
                 {variantLabel(variant) ? (
                   <>
                     {variantLabel(variant)}
@@ -244,48 +247,58 @@ const PaypalSubscriptionDetailPage = () => {
                   <span className="font-mono">{row.variant_id || "—"}</span>
                 )}
               </Field>
-              <Field label="Locked amount">
+              <Field label={t("field.lockedAmount")}>
                 {formatMoney(row.locked_amount, row.currency_code)}{" "}
                 <span className="text-ui-fg-subtle">
-                  (renews at this price, not the current catalog price)
+                  {t("field.lockedAmountNote")}
                 </span>
               </Field>
-              <Field label="Billing period">
+              <Field label={t("field.billingPeriod")}>
                 {formatBillingPeriod(row.interval_unit, row.interval_count)}
               </Field>
-              <Field label="Next billing">{formatDate(row.next_billing_at)}</Field>
-              <Field label="Last billing">{formatDate(row.last_billing_at)}</Field>
-              <Field label="Failed renewal attempts">{row.failure_count}</Field>
-              <Field label="Payment session">
+              <Field label={t("field.nextBilling")}>
+                {formatDate(row.next_billing_at)}
+              </Field>
+              <Field label={t("field.lastBilling")}>
+                {formatDate(row.last_billing_at)}
+              </Field>
+              <Field label={t("field.failedRenewalAttempts")}>
+                {row.failure_count}
+              </Field>
+              <Field label={t("field.paymentSession")}>
                 <span className="font-mono">{row.payment_session_id || "—"}</span>
               </Field>
-              <Field label="Payment collection">
-                <span className="font-mono">{row.payment_collection_id || "—"}</span>
+              <Field label={t("field.paymentCollection")}>
+                <span className="font-mono">
+                  {row.payment_collection_id || "—"}
+                </span>
               </Field>
-              <Field label="Provider">
+              <Field label={t("field.provider")}>
                 <span className="font-mono">{row.provider_id || "—"}</span>
               </Field>
-              <Field label="Created">{formatDate(row.created_at)}</Field>
-              <Field label="Last updated">{formatDate(row.updated_at)}</Field>
+              <Field label={t("field.created")}>{formatDate(row.created_at)}</Field>
+              <Field label={t("field.lastUpdated")}>
+                {formatDate(row.updated_at)}
+              </Field>
             </div>
           </Container>
 
           <Container className="px-6 py-4">
             <Heading level="h2" className="mb-4">
-              Sales history
+              {t("sales.heading")}
             </Heading>
             {(row.sales ?? []).length === 0 ? (
               <Text size="small" className="text-ui-fg-subtle">
-                No sales recorded yet.
+                {t("sales.empty")}
               </Text>
             ) : (
               <Table>
                 <Table.Header>
                   <Table.Row>
-                    <Table.HeaderCell>Sale</Table.HeaderCell>
-                    <Table.HeaderCell>Order</Table.HeaderCell>
-                    <Table.HeaderCell>Amount</Table.HeaderCell>
-                    <Table.HeaderCell>Billed at</Table.HeaderCell>
+                    <Table.HeaderCell>{t("col.sale")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("col.order")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("col.amount")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("col.billedAt")}</Table.HeaderCell>
                   </Table.Row>
                 </Table.Header>
                 <Table.Body className="divide-y divide-ui-border-base">
@@ -321,20 +334,20 @@ const PaypalSubscriptionDetailPage = () => {
 
           <Container className="px-6 py-4">
             <Heading level="h2" className="mb-4">
-              Refund history
+              {t("refunds.heading")}
             </Heading>
             {(row.refunds ?? []).length === 0 ? (
               <Text size="small" className="text-ui-fg-subtle">
-                No refunds recorded.
+                {t("refunds.empty")}
               </Text>
             ) : (
               <Table>
                 <Table.Header>
                   <Table.Row>
-                    <Table.HeaderCell>Refund</Table.HeaderCell>
-                    <Table.HeaderCell>Order</Table.HeaderCell>
-                    <Table.HeaderCell>Amount</Table.HeaderCell>
-                    <Table.HeaderCell>Refunded at</Table.HeaderCell>
+                    <Table.HeaderCell>{t("col.refund")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("col.order")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("col.amount")}</Table.HeaderCell>
+                    <Table.HeaderCell>{t("col.refundedAt")}</Table.HeaderCell>
                   </Table.Row>
                 </Table.Header>
                 <Table.Body className="divide-y divide-ui-border-base">
@@ -368,17 +381,16 @@ const PaypalSubscriptionDetailPage = () => {
           <div className="w-full max-w-lg">
             <Container className="p-6">
               <Heading level="h2" className="mb-2 text-ui-fg-error">
-                Cancel this subscription?
+                {t("modal.heading")}
               </Heading>
               <div className="flex flex-col gap-y-3">
                 <Text size="small" className="text-ui-fg-base">
-                  This action is <strong>irreversible</strong>. Cancelling
-                  terminates the PayPal billing agreement immediately - it
-                  cannot be resumed.
+                  {t("modal.irrevPrefix")}
+                  <strong>{t("modal.irrevBold")}</strong>
+                  {t("modal.irrevSuffix")}
                 </Text>
                 <Text size="small" className="text-ui-fg-subtle">
-                  The customer keeps access for periods already paid. To pause
-                  charging temporarily, use Suspend instead (reversible).
+                  {t("modal.paidPeriods")}
                 </Text>
                 {row?.paypal_subscription_id && (
                   <Text size="small" className="font-mono text-ui-fg-subtle">
@@ -392,7 +404,7 @@ const PaypalSubscriptionDetailPage = () => {
                     disabled={busy}
                     onClick={() => setShowCancelModal(false)}
                   >
-                    Keep subscription
+                    {t("modal.keep")}
                   </Button>
                   <Button
                     size="small"
@@ -400,7 +412,7 @@ const PaypalSubscriptionDetailPage = () => {
                     disabled={busy}
                     onClick={() => runAction("cancel")}
                   >
-                    {pending === "cancel" ? "Cancelling…" : "Cancel permanently"}
+                    {pending === "cancel" ? t("modal.cancelling") : t("modal.confirm")}
                   </Button>
                 </div>
               </div>

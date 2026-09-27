@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-09-27
+
+### Fixed
+
+- **Admin extension pages no longer 401**: the plugin's admin SDK client did
+  not declare an auth type, so js-sdk sent every extension-page request with
+  `credentials: "omit"` and no Bearer header - while the dashboard
+  authenticates via the `/auth/session` cookie and never writes a JWT to
+  localStorage, leaving those requests with no credentials at all. The client
+  now declares `auth: { type: "session" }` (mirroring the dashboard's own
+  js-sdk setup), so requests carry the session cookie, and a 401 surfaces as
+  a friendly "session expired" message instead of a raw `Unauthorized`.
+
+### Changed
+
+- **Customer / product enrichment now takes effect**: the list and detail
+  pages resolve customer emails and product/variant titles through the same
+  SDK client, so with the auth fixed those columns show real emails and
+  titles instead of raw ids - a visible change of the 0.6.0 enrichment, not a
+  regression.
+
+### Added
+
+- **Chinese UI**: the admin extension pages now carry an English / Chinese
+  dictionary. The language follows the dashboard's language setting or the
+  browser language, and the subscription list page has a manual `EN | 中文`
+  toggle (persisted in localStorage); the sidebar label stays English.
+
 ## [0.6.0] - 2026-09-27
 
 ### Added

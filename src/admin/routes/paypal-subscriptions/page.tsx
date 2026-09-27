@@ -28,10 +28,49 @@ import {
   type CustomerInfo,
   type VariantInfo,
 } from "../../lib/enrich"
+import {
+  friendlyError,
+  resolveLang,
+  setLang,
+  statusLabel,
+  t,
+  type Lang,
+} from "../../lib/i18n"
 
 const PAGE_SIZE = 20
 
 const FILTERS = ["ALL", ...SUBSCRIPTION_STATUSES] as const
+
+const LanguageToggle = ({
+  lang,
+  onSwitch,
+}: {
+  lang: Lang
+  onSwitch: (lang: Lang) => void
+}) => (
+  <div className="flex items-center gap-1">
+    <button
+      type="button"
+      aria-pressed={lang === "en"}
+      onClick={() => onSwitch("en")}
+      className="focus:outline-none"
+    >
+      <Badge size="2xsmall" color={lang === "en" ? "purple" : "grey"}>
+        EN
+      </Badge>
+    </button>
+    <button
+      type="button"
+      aria-pressed={lang === "zh"}
+      onClick={() => onSwitch("zh")}
+      className="focus:outline-none"
+    >
+      <Badge size="2xsmall" color={lang === "zh" ? "purple" : "grey"}>
+        中文
+      </Badge>
+    </button>
+  </div>
+)
 
 const SubscriptionListPage = () => {
   const [rows, setRows] = useState<SubscriptionRow[]>([])
@@ -42,6 +81,14 @@ const SubscriptionListPage = () => {
   const [error, setError] = useState<string | null>(null)
   const [customers, setCustomers] = useState<Record<string, CustomerInfo>>({})
   const [variants, setVariants] = useState<Record<string, VariantInfo>>({})
+  // Language state exists to re-render on toggle; t() resolves the language
+  // fresh on every call. The detail page follows this via localStorage.
+  const [lang, setLangState] = useState<Lang>(resolveLang)
+
+  const switchLang = (next: Lang) => {
+    setLang(next)
+    setLangState(next)
+  }
 
   const load = useCallback(
     async (opts: { status: string; offset: number }) => {
@@ -83,7 +130,7 @@ const SubscriptionListPage = () => {
         setCustomers(customerMap)
         setVariants(variantMap)
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e))
+        setError(friendlyError(e))
         setRows([])
         setCount(0)
       } finally {
@@ -108,11 +155,12 @@ const SubscriptionListPage = () => {
       <Container className="p-0">
         <div className="flex items-center justify-between px-6 py-4">
           <div>
-            <Heading level="h1">PayPal Subscriptions</Heading>
+            <Heading level="h1">{t("app.title")}</Heading>
             <Text size="small" className="text-ui-fg-subtle">
-              {loading ? "Loading…" : `${count} subscription${count === 1 ? "" : "s"}`}
+              {loading ? t("common.loading") : t("list.count", { count })}
             </Text>
           </div>
+          <LanguageToggle lang={lang} onSwitch={switchLang} />
         </div>
         <div className="flex flex-wrap items-center gap-1.5 px-6 pb-4">
           {FILTERS.map((f) => {
@@ -126,7 +174,7 @@ const SubscriptionListPage = () => {
                 className="focus:outline-none"
               >
                 <Badge size="2xsmall" color={active ? "purple" : "grey"}>
-                  {f === "ALL" ? "All" : f.replace(/_/g, " ")}
+                  {f === "ALL" ? t("list.filterAll") : statusLabel(f)}
                 </Badge>
               </button>
             )
@@ -138,21 +186,21 @@ const SubscriptionListPage = () => {
         {error ? (
           <div className="px-6 py-4">
             <Text size="small" className="text-ui-fg-error">
-              Failed to load subscriptions: {error}
+              {t("list.loadFailed")} {error}
             </Text>
           </div>
         ) : (
           <Table>
             <Table.Header>
               <Table.Row>
-                <Table.HeaderCell>Subscription</Table.HeaderCell>
-                <Table.HeaderCell>Status</Table.HeaderCell>
-                <Table.HeaderCell>Customer</Table.HeaderCell>
-                <Table.HeaderCell>Variant</Table.HeaderCell>
-                <Table.HeaderCell>Locked amount</Table.HeaderCell>
-                <Table.HeaderCell>Billing period</Table.HeaderCell>
-                <Table.HeaderCell>Next billing</Table.HeaderCell>
-                <Table.HeaderCell>Failures</Table.HeaderCell>
+                <Table.HeaderCell>{t("col.subscription")}</Table.HeaderCell>
+                <Table.HeaderCell>{t("col.status")}</Table.HeaderCell>
+                <Table.HeaderCell>{t("col.customer")}</Table.HeaderCell>
+                <Table.HeaderCell>{t("col.variant")}</Table.HeaderCell>
+                <Table.HeaderCell>{t("col.lockedAmount")}</Table.HeaderCell>
+                <Table.HeaderCell>{t("col.billingPeriod")}</Table.HeaderCell>
+                <Table.HeaderCell>{t("col.nextBilling")}</Table.HeaderCell>
+                <Table.HeaderCell>{t("col.failures")}</Table.HeaderCell>
               </Table.Row>
             </Table.Header>
             <Table.Body className="divide-y divide-ui-border-base">
@@ -171,7 +219,7 @@ const SubscriptionListPage = () => {
                   </Table.Cell>
                   <Table.Cell>
                     <StatusBadge color={statusBadgeColor(row.status)}>
-                      {row.status.replace(/_/g, " ")}
+                      {statusLabel(row.status)}
                     </StatusBadge>
                   </Table.Cell>
                   <Table.Cell>
@@ -202,7 +250,7 @@ const SubscriptionListPage = () => {
                 <Table.Row>
                   <Table.Cell colSpan={8}>
                     <Text size="small" className="text-ui-fg-subtle">
-                      No subscriptions found.
+                      {t("list.empty")}
                     </Text>
                   </Table.Cell>
                 </Table.Row>
@@ -215,8 +263,12 @@ const SubscriptionListPage = () => {
       <div className="flex items-center justify-between px-6">
         <Text size="small" className="text-ui-fg-subtle">
           {count === 0
-            ? "0 results"
-            : `${offset + 1}–${Math.min(offset + PAGE_SIZE, count)} of ${count}`}
+            ? t("list.zeroResults")
+            : t("list.resultsRange", {
+                from: offset + 1,
+                to: Math.min(offset + PAGE_SIZE, count),
+                total: count,
+              })}
         </Text>
         <div className="flex gap-2">
           <Button
@@ -225,7 +277,7 @@ const SubscriptionListPage = () => {
             disabled={offset === 0 || loading}
             onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
           >
-            Previous
+            {t("common.previous")}
           </Button>
           <Button
             size="small"
@@ -233,7 +285,7 @@ const SubscriptionListPage = () => {
             disabled={offset + PAGE_SIZE >= count || loading}
             onClick={() => setOffset(offset + PAGE_SIZE)}
           >
-            Next
+            {t("common.next")}
           </Button>
         </div>
       </div>

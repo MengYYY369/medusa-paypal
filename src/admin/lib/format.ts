@@ -1,3 +1,5 @@
+import { localeTag, t, unitLabel } from "./i18n"
+
 type BadgeColor = "green" | "red" | "blue" | "orange" | "grey" | "purple"
 
 const STATUS_BADGE_COLORS: Record<string, BadgeColor> = {
@@ -22,7 +24,8 @@ export const statusBadgeColor = (status: string | null | undefined): BadgeColor 
 
 /**
  * All amounts in this plugin are major units (e.g. 9.99 = $9.99) - never
- * apply a x/÷100 conversion here. Currency follows the row's currency_code.
+ * apply a x/÷100 conversion here. Currency follows the row's currency_code;
+ * formatting follows the selected UI language (not the browser default).
  */
 export function formatMoney(
   amount: number | string | null | undefined,
@@ -33,7 +36,7 @@ export function formatMoney(
   if (Number.isNaN(n)) return String(amount)
   const code = (currency || "USD").toUpperCase()
   try {
-    return new Intl.NumberFormat(undefined, {
+    return new Intl.NumberFormat(localeTag(), {
       style: "currency",
       currency: code,
     }).format(n)
@@ -46,7 +49,7 @@ export function formatDate(value: string | null | undefined): string {
   if (!value) return "—"
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return value
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(localeTag(), {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(d)
@@ -59,5 +62,8 @@ export function formatBillingPeriod(
   const c = Number(count) || 1
   const u = (unit || "").toLowerCase()
   if (!u) return "—"
-  return c === 1 ? `Every ${u}` : `Every ${c} ${u}s`
+  const label = unitLabel(u)
+  return c === 1
+    ? t("period.every", { unit: label })
+    : t("period.everyN", { count: c, unit: label })
 }

@@ -3,12 +3,13 @@ import Medusa from "@medusajs/js-sdk"
 declare const __BACKEND_URL__: string
 
 /**
- * Admin SDK instance for plugin extension pages. The admin dashboard stores
- * its auth token under `medusa_auth_token` in localStorage; the SDK default
- * storage key matches, so requests made with this client carry the logged-in
- * admin's credentials automatically.
+ * Admin SDK instance for plugin extension pages. The dashboard authenticates
+ * via the /auth/session cookie, so this client must declare session auth:
+ * js-sdk then sends cookies (credentials: "include") and skips the
+ * localStorage JWT lookup entirely.
  */
 export const sdk = new Medusa({
   baseUrl: __BACKEND_URL__ || window.location.origin,
   debug: false,
+  auth: { type: "session" },
 })

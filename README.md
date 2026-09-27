@@ -348,6 +348,9 @@ charge; the actually-charged amount and currency ride on the
   - Amounts are shown in Medusa major units (the locked recurring price, not
     the current catalog price). Rejections from PayPal (e.g. a status that
     does not allow the action) surface their actual reason in the UI.
+  - The interface switches between English and Chinese automatically (it
+    follows the admin's language setting or the browser language), and the
+    list page has a manual `EN | 中文` toggle.
 - **Customer self-service** (customer auth):
   - `GET /store/paypal/subscriptions` - own subscriptions
   - `POST /store/paypal/subscriptions/:id/cancel` - cancel own subscription
