@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The sidebar entry follows the dashboard language**: the route config now
+  declares `translationNs` with the label as a key, and `src/admin/i18n/index.ts`
+  registers the plugin's `paypal` namespace (`virtual:medusa/i18n`), so the
+  sidebar shows "PayPal Subscriptions" in English and "PayPal 订阅" in Chinese.
+  The English value is a byte-for-byte copy of the previous label.
+
 ## [0.6.1] - 2026-09-27
 
 ### Fixed

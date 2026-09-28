@@ -296,6 +296,7 @@ const SubscriptionListPage = () => {
 export default SubscriptionListPage
 
 export const config = defineRouteConfig({
-  label: "PayPal Subscriptions",
+  label: "menuItems.subscriptions",
+  translationNs: "paypal",
   icon: CreditCard,
 })
