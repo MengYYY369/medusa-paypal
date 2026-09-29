@@ -4,9 +4,11 @@ import {
   Modules,
   PaymentWebhookEvents,
 } from "@medusajs/framework/utils";
-import { PaypalService } from "../../../../providers/paypal/paypal-core";
 import { isSubscriptionEvent } from "../../../../subscription/engine";
-import { findPaypalProviderDeclaration } from "../../../lib/paypal";
+import {
+  findPaypalProviderDeclaration,
+  resolvePaypalClient,
+} from "../../../lib/paypal";
 
 /**
  * Plugin-owned webhook endpoint for the subscription rail (dual-webhook
@@ -31,14 +33,18 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       return res.status(404).json({ error: "PayPal provider not found" });
     }
 
-    const client = new PaypalService(provider.options);
+    // Both the client and the verification id come from the resolved config,
+    // so an admin edit to the credentials or webhook ids applies here too.
+    const { client, config } = await resolvePaypalClient(
+      req.scope,
+      provider.options
+    );
 
     try {
       await client.verifyWebhook({
         headers: req.headers as Record<string, string>,
         body: req.body as object,
-        webhookId:
-          provider.options.subscriptionWebhookId ?? provider.options.webhookId,
+        webhookId: config.subscriptionWebhookId ?? config.webhookId,
       });
     } catch (error) {
       req.scope

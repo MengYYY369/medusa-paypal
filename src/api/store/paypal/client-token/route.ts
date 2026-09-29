@@ -1,42 +1,31 @@
 import { MedusaRequest, MedusaResponse } from "@medusajs/framework";
 import { PostStorePaypalPaymentType } from "./validators";
-import { PaypalService } from "../../../../providers/paypal/paypal-core";
-import { PaypalPluginOptionsType } from "../../../../providers/paypal/service";
-
-interface PaymentProvidersProps {
-  resolve: string;
-  id: string;
-  options: PaypalPluginOptionsType;
-}
-
-const base =
-  process.env.PAYPAL_SANDBOX === "true"
-    ? "https://api-m.sandbox.paypal.com"
-    : "https://api-m.paypal.com";
+import {
+  findPaypalProviderDeclaration,
+  resolvePaypalClient,
+} from "../../../lib/paypal";
 
 export const POST = async (
   req: MedusaRequest<PostStorePaypalPaymentType>,
   res: MedusaResponse
 ) => {
-  const paymentModule = req.scope.resolve("payment");
+  const paymentModule = req.scope.resolve<any>("payment");
 
-  //@ts-ignore
-  const paymentProviders = paymentModule.moduleDeclaration
-    .providers as PaymentProvidersProps[];
-
-  const paypalProvider = paymentProviders.find(
-    (provider) => provider.id === "paypal"
-  );
+  // Shared lookup (also accepts a declaration without an `id`, where the
+  // registration key is "pp_paypal"): a host that registers the provider as
+  // `{ resolve: ".../providers/paypal", options }` must not 404 here.
+  const paypalProvider = findPaypalProviderDeclaration(paymentModule);
 
   if (!paypalProvider) {
     return res.status(404).json({ error: "Paypal provider not found" });
   }
 
-  const paypalService = new PaypalService(paypalProvider.options);
+  // The client carries the resolved environment, including its REST base URL.
+  const { client } = await resolvePaypalClient(req.scope, paypalProvider.options);
 
-  const accessToken = await paypalService.getAccessToken();
+  const accessToken = await client.getAccessToken();
 
-  const response = await fetch(`${base}/v1/identity/generate-token`, {
+  const response = await fetch(`${client.baseUrl}/v1/identity/generate-token`, {
     method: "post",
     headers: {
       Authorization: `Bearer ${accessToken}`,

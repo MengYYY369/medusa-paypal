@@ -1,5 +1,11 @@
 import { MedusaError } from "@medusajs/framework/utils";
+import { PaypalService } from "../../providers/paypal/paypal-core";
 import { PaypalPluginOptionsType } from "../../providers/paypal/service";
+import {
+  assertPaypalConfigured,
+  mergePaypalConfigLayers,
+  PaypalResolvedConfig,
+} from "../../modules/paypal-subscription/lib/config-resolver";
 
 interface PaymentProvidersProps {
   resolve: string;
@@ -69,4 +75,34 @@ export function resolveSubscriptionModule(scope: {
   }
 
   return module;
+}
+
+/**
+ * Builds a PayPal client from the configuration resolved right now: through
+ * the subscription module's resolver when the module is registered (DB
+ * overrides -> provider options -> plugin options), and through the provider
+ * options alone otherwise. Throws the shared configuration error when the
+ * credentials are missing - an unconfigured SDK client would send
+ * `Basic Og==` and surface as a confusing PayPal 401.
+ */
+export async function resolvePaypalClient(
+  scope: { resolve: (key: string) => unknown },
+  providerOptions: PaypalPluginOptionsType
+): Promise<{ client: PaypalService; config: PaypalResolvedConfig }> {
+  let config: PaypalResolvedConfig;
+
+  try {
+    const module = resolveSubscriptionModule(scope);
+    const resolved = await module.getResolvedPaypalConfig({ providerOptions });
+
+    config = resolved.config;
+  } catch {
+    // Module not registered (or no resolver on it): the provider options are
+    // the only configured layer.
+    config = mergePaypalConfigLayers({ providerOptions }).config;
+  }
+
+  assertPaypalConfigured(config);
+
+  return { client: new PaypalService(config), config };
 }
