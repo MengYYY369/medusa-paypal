@@ -11,14 +11,14 @@ import {
   Toaster,
   toast,
 } from "@medusajs/ui"
-import { sdk } from "../../../lib/sdk"
-import type { SubscriptionRow } from "../../../lib/types"
+import { sdk } from "../../../../lib/sdk"
+import type { SubscriptionRow } from "../../../../lib/types"
 import {
   formatBillingPeriod,
   formatDate,
   formatMoney,
   statusBadgeColor,
-} from "../../../lib/format"
+} from "../../../../lib/format"
 import {
   customerLabel,
   fetchCustomerMap,
@@ -26,8 +26,8 @@ import {
   variantLabel,
   type CustomerInfo,
   type VariantInfo,
-} from "../../../lib/enrich"
-import { friendlyError, statusLabel, t } from "../../../lib/i18n"
+} from "../../../../lib/enrich"
+import { friendlyError, statusLabel, t } from "../../../../lib/i18n"
 
 type Action = "cancel" | "suspend" | "resume"
 

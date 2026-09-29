@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { Link } from "react-router-dom"
 import { defineRouteConfig } from "@medusajs/admin-sdk"
-import { CreditCard } from "@medusajs/icons"
 import {
   Badge,
   Button,
@@ -11,15 +10,15 @@ import {
   Table,
   Text,
 } from "@medusajs/ui"
-import { sdk } from "../../lib/sdk"
-import type { SubscriptionRow } from "../../lib/types"
+import { sdk } from "../../../lib/sdk"
+import type { SubscriptionRow } from "../../../lib/types"
 import {
   SUBSCRIPTION_STATUSES,
   formatBillingPeriod,
   formatDate,
   formatMoney,
   statusBadgeColor,
-} from "../../lib/format"
+} from "../../../lib/format"
 import {
   customerLabel,
   fetchCustomerMap,
@@ -27,7 +26,7 @@ import {
   variantLabel,
   type CustomerInfo,
   type VariantInfo,
-} from "../../lib/enrich"
+} from "../../../lib/enrich"
 import {
   friendlyError,
   resolveLang,
@@ -35,42 +34,12 @@ import {
   statusLabel,
   t,
   type Lang,
-} from "../../lib/i18n"
+} from "../../../lib/i18n"
+import { LanguageToggle } from "../../../lib/lang-toggle"
 
 const PAGE_SIZE = 20
 
 const FILTERS = ["ALL", ...SUBSCRIPTION_STATUSES] as const
-
-const LanguageToggle = ({
-  lang,
-  onSwitch,
-}: {
-  lang: Lang
-  onSwitch: (lang: Lang) => void
-}) => (
-  <div className="flex items-center gap-1">
-    <button
-      type="button"
-      aria-pressed={lang === "en"}
-      onClick={() => onSwitch("en")}
-      className="focus:outline-none"
-    >
-      <Badge size="2xsmall" color={lang === "en" ? "purple" : "grey"}>
-        EN
-      </Badge>
-    </button>
-    <button
-      type="button"
-      aria-pressed={lang === "zh"}
-      onClick={() => onSwitch("zh")}
-      className="focus:outline-none"
-    >
-      <Badge size="2xsmall" color={lang === "zh" ? "purple" : "grey"}>
-        中文
-      </Badge>
-    </button>
-  </div>
-)
 
 const SubscriptionListPage = () => {
   const [rows, setRows] = useState<SubscriptionRow[]>([])
@@ -208,7 +177,7 @@ const SubscriptionListPage = () => {
                 <Table.Row key={row.id}>
                   <Table.Cell>
                     <Link
-                      to={`/paypal-subscriptions/${row.id}`}
+                      to={`/paypal/subscriptions/${row.id}`}
                       className="text-ui-fg-base font-medium hover:text-ui-fg-interactive"
                     >
                       {row.paypal_subscription_id || row.id}
@@ -295,8 +264,10 @@ const SubscriptionListPage = () => {
 
 export default SubscriptionListPage
 
+// Child of the /paypal menu item; no icon - the dashboard renders only the
+// label for nested items.
 export const config = defineRouteConfig({
   label: "menuItems.subscriptions",
+  rank: 1,
   translationNs: "paypal",
-  icon: CreditCard,
 })
