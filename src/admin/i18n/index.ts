@@ -4,19 +4,23 @@
  * Two consumers read this file:
  *   1. the Medusa admin bundler, which crawls `<admin>/i18n/index.*` and
  *      inlines the default export as the `virtual:medusa/i18n` resource - the
- *      dashboard deep-merges it over its own catalogs and resolves any
- *      `defineRouteConfig` label carrying a `translationNs` hint with
- *      `t(label, { ns })`. Only the host can render those labels;
- *   2. the extension pages, which import `DICT` directly (a plugin page has no
- *      handle on the dashboard's i18next instance).
+ *      dashboard deep-merges it over its own catalogs under the private
+ *      `paypal` namespace, resolves any `defineRouteConfig` label carrying a
+ *      `translationNs` hint with `t(label, { ns })`, and initialises its
+ *      i18next singleton with the languages found here (`en`, `zhCN`);
+ *   2. the extension pages, which read that same namespace through the
+ *      dashboard's react-i18next instance (`useTranslation("paypal")` in
+ *      components, `getI18n()` elsewhere - see `lib/i18n.ts`).
  * The host resource is derived from `DICT` rather than written twice, so the
- * sidebar label and the page copy cannot drift. The page-only keys riding
- * along in the host resource are inert - nothing on the dashboard side looks
- * them up.
+ * sidebar labels and the page copy cannot drift.
  *
  * Keys follow the host convention `<domain>.<area>`, `menuItems.*` is
  * reserved for sidebar labels, and the English `menuItems.subscriptions` value
  * is a byte-for-byte copy of the label that shipped before i18n.
+ *
+ * Interpolation uses i18next's `{{name}}` syntax. `count` is a reserved
+ * i18next option (it triggers plural-form lookup), so the subscription list
+ * count passes `total` instead.
  */
 
 export type Lang = "en" | "zh"
@@ -26,8 +30,9 @@ export type DictEntry = { en: string; zh: string }
 export const DICT: Record<string, DictEntry> = {
   "menuItems.paypal": { en: "PayPal", zh: "PayPal" },
   "menuItems.subscriptions": { en: "PayPal Subscriptions", zh: "PayPal 订阅" },
+  "menuItems.auditLog": { en: "Audit log", zh: "审计日志" },
   // Settings page: environment banner, read-only integration info, the four
-  // form groups, save/test status bars and the change history.
+  // form groups and the save/test status bars.
   "settings.title": { en: "PayPal", zh: "PayPal" },
   "settings.subtitle": { en: "Configuration", zh: "配置" },
   "settings.loadFailed": { en: "Failed to load settings:", zh: "配置加载失败：" },
@@ -179,8 +184,8 @@ export const DICT: Record<string, DictEntry> = {
   "settings.action.testing": { en: "Testing…", zh: "测试中…" },
   "settings.action.discard": { en: "Discard changes", zh: "放弃修改" },
   "settings.save.dirtyCount": {
-    en: "{count} unsaved change(s)",
-    zh: "{count} 项未保存",
+    en: "{{count}} unsaved change(s)",
+    zh: "{{count}} 项未保存",
   },
   "settings.save.clean": { en: "No unsaved changes", zh: "没有未保存的修改" },
   "settings.save.success": {
@@ -189,32 +194,32 @@ export const DICT: Record<string, DictEntry> = {
   },
   "settings.save.failed": { en: "Save failed:", zh: "保存失败：" },
   "settings.test.success": {
-    en: "Connection test succeeded ({environment}, {ms} ms)",
-    zh: "连接测试成功（{environment}，{ms} 毫秒）",
+    en: "Connection test succeeded ({{environment}}, {{ms}} ms)",
+    zh: "连接测试成功（{{environment}}，{{ms}} 毫秒）",
   },
   "settings.test.failed": {
-    en: "Connection test failed ({environment}): {error}",
-    zh: "连接测试失败（{environment}）：{error}",
+    en: "Connection test failed ({{environment}}): {{error}}",
+    zh: "连接测试失败（{{environment}}）：{{error}}",
   },
   "settings.envModal.heading": {
     en: "Switch PayPal environment?",
     zh: "确定切换 PayPal 环境？",
   },
   "settings.envModal.body": {
-    en: "Switching from {from} to {to}. The following will be affected:",
-    zh: "即将从 {from} 切换到 {to}，以下内容会受影响：",
+    en: "Switching from {{from}} to {{to}}. The following will be affected:",
+    zh: "即将从 {{from}} 切换到 {{to}}，以下内容会受影响：",
   },
   "settings.envModal.activeCount": {
-    en: "{count} active subscription(s) in the current environment keep renewing against the old environment.",
-    zh: "当前环境有 {count} 个生效中的订阅，仍将在旧环境续费。",
+    en: "{{count}} active subscription(s) in the current environment keep renewing against the old environment.",
+    zh: "当前环境有 {{count}} 个生效中的订阅，仍将在旧环境续费。",
   },
   "settings.envModal.activeCountLoading": {
     en: "Counting active subscriptions…",
     zh: "正在统计生效中的订阅…",
   },
   "settings.envModal.activeCountFailed": {
-    en: "Could not load the active subscription count: {error}",
-    zh: "无法获取生效中的订阅数量：{error}",
+    en: "Could not load the active subscription count: {{error}}",
+    zh: "无法获取生效中的订阅数量：{{error}}",
   },
   "settings.envModal.plans": {
     en: "Plan rows minted in the old environment will not be reused - new plans are minted for the new environment.",
@@ -226,35 +231,31 @@ export const DICT: Record<string, DictEntry> = {
   },
   "settings.envModal.cancel": { en: "Cancel", zh: "取消" },
   "settings.envModal.confirm": { en: "Switch & save", zh: "切换并保存" },
-  "settings.history.heading": { en: "Change history", zh: "变更历史" },
-  "settings.history.show": {
-    en: "Show last 20 changes",
-    zh: "展开最近 20 条变更",
+  // Audit log sub-page (`/paypal/audit`): the settings change trail, moved out
+  // of the configuration page. The change-history-to-audit-log rename is the
+  // one sanctioned change to the frozen English baseline.
+  "audit.title": { en: "Audit log", zh: "审计日志" },
+  "audit.empty": { en: "No changes recorded yet.", zh: "暂无变更记录" },
+  "audit.loadFailed": {
+    en: "Failed to load audit log:",
+    zh: "审计日志加载失败：",
   },
-  "settings.history.hide": { en: "Hide", zh: "收起" },
-  "settings.history.empty": {
-    en: "No changes recorded yet.",
-    zh: "暂无变更记录",
-  },
-  "settings.history.loadFailed": {
-    en: "Failed to load change history:",
-    zh: "变更历史加载失败：",
-  },
-  "settings.history.actor": { en: "Actor", zh: "操作人" },
-  "settings.history.time": { en: "Time", zh: "时间" },
-  "settings.history.changes": { en: "Changes", zh: "变更内容" },
-  "settings.history.system": { en: "System", zh: "系统" },
+  "audit.actor": { en: "Actor", zh: "操作人" },
+  "audit.time": { en: "Time", zh: "时间" },
+  "audit.changes": { en: "Changes", zh: "变更内容" },
+  "audit.system": { en: "System", zh: "系统" },
+  "audit.loadMore": { en: "Load more", zh: "加载更多" },
   "app.title": { en: "PayPal Subscriptions", zh: "PayPal 订阅" },
   "common.loading": { en: "Loading…", zh: "加载中…" },
   "common.refresh": { en: "Refresh", zh: "刷新" },
   "common.previous": { en: "Previous", zh: "上一页" },
   "common.next": { en: "Next", zh: "下一页" },
-  "list.count": { en: "{count} subscription(s)", zh: "{count} 个订阅" },
+  "list.count": { en: "{{total}} subscription(s)", zh: "{{total}} 个订阅" },
   "list.filterAll": { en: "All", zh: "全部" },
   "list.empty": { en: "No subscriptions found.", zh: "暂无订阅" },
   "list.resultsRange": {
-    en: "{from}–{to} of {total}",
-    zh: "第 {from}–{to} 条，共 {total} 条",
+    en: "{{from}}–{{to}} of {{total}}",
+    zh: "第 {{from}}–{{to}} 条，共 {{total}} 条",
   },
   "list.zeroResults": { en: "0 results", zh: "0 条结果" },
   "list.loadFailed": {
@@ -275,8 +276,8 @@ export const DICT: Record<string, DictEntry> = {
   "col.amount": { en: "Amount", zh: "金额" },
   "col.billedAt": { en: "Billed at", zh: "扣款时间" },
   "col.refundedAt": { en: "Refunded at", zh: "退款时间" },
-  "period.every": { en: "Every {unit}", zh: "每 {unit}" },
-  "period.everyN": { en: "Every {count} {unit}s", zh: "每 {count} {unit}" },
+  "period.every": { en: "Every {{unit}}", zh: "每 {{unit}}" },
+  "period.everyN": { en: "Every {{count}} {{unit}}s", zh: "每 {{count}} {{unit}}" },
   "period.unit.day": { en: "day", zh: "天" },
   "period.unit.week": { en: "week", zh: "周" },
   "period.unit.month": { en: "month", zh: "月" },

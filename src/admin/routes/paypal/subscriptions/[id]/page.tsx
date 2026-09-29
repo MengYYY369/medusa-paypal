@@ -27,7 +27,7 @@ import {
   type CustomerInfo,
   type VariantInfo,
 } from "../../../../lib/enrich"
-import { friendlyError, statusLabel, t } from "../../../../lib/i18n"
+import { friendlyError, statusLabel, usePaypalT } from "../../../../lib/i18n"
 
 type Action = "cancel" | "suspend" | "resume"
 
@@ -43,6 +43,7 @@ const Field = ({ label, children }: { label: string; children: ReactNode }) => (
 )
 
 const PaypalSubscriptionDetailPage = () => {
+  const t = usePaypalT()
   const { id } = useParams()
   const [row, setRow] = useState<SubscriptionRow | null>(null)
   const [loading, setLoading] = useState(true)

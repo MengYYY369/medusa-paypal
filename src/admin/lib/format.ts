@@ -1,4 +1,4 @@
-import { localeTag, t, unitLabel } from "./i18n"
+import { localeTag, translate, unitLabel } from "./i18n"
 
 type BadgeColor = "green" | "red" | "blue" | "orange" | "grey" | "purple"
 
@@ -64,6 +64,6 @@ export function formatBillingPeriod(
   if (!u) return "—"
   const label = unitLabel(u)
   return c === 1
-    ? t("period.every", { unit: label })
-    : t("period.everyN", { count: c, unit: label })
+    ? translate("period.every", { unit: label })
+    : translate("period.everyN", { count: c, unit: label })
 }

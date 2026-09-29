@@ -5,7 +5,6 @@ import {
   CreditCard,
   ExclamationCircleSolid,
   InformationCircleSolid,
-  TriangleRightMini,
   XCircleSolid,
 } from "@medusajs/icons"
 import {
@@ -18,26 +17,17 @@ import {
   Input,
   Label,
   Switch,
-  Table,
   Text,
   TooltipProvider,
 } from "@medusajs/ui"
 import { sdk } from "../../lib/sdk"
 import type {
-  PaypalAuditEntry,
   PaypalConfigSource,
   PaypalSettingsResponse,
   PaypalTestResult,
 } from "../../lib/types"
 import { formatDate } from "../../lib/format"
-import { LanguageToggle } from "../../lib/lang-toggle"
-import {
-  friendlyError,
-  resolveLang,
-  setLang,
-  t,
-  type Lang,
-} from "../../lib/i18n"
+import { friendlyError, translate, usePaypalT } from "../../lib/i18n"
 
 /**
  * PayPal configuration page (`/paypal`).
@@ -131,24 +121,11 @@ const fieldOf = (
 const envLabel = (environment: string): string => {
   const key = `settings.env.${environment}`
   return ["sandbox", "production", "unconfigured"].includes(environment)
-    ? t(key)
+    ? translate(key)
     : environment
 }
 
-const fieldLabel = (key: string): string => t(`settings.field.${key}`)
-
-/**
- * Audit diff values: null means the field was (or becomes) inherited, so it
- * gets the explicit "inherit" label instead of an ambiguous dash. Secrets are
- * already masked by the server.
- */
-const formatAuditValue = (value: unknown): string => {
-  if (value === null || value === undefined) return t("settings.value.inherit")
-  if (typeof value === "boolean") {
-    return value ? t("settings.value.on") : t("settings.value.off")
-  }
-  return String(value)
-}
+const fieldLabel = (key: string): string => translate(`settings.field.${key}`)
 
 const EnvironmentBanner = ({
   environment,
@@ -161,9 +138,11 @@ const EnvironmentBanner = ({
       <Icon className="mt-0.5 shrink-0" />
       <div className="flex flex-col gap-y-0.5">
         <Text size="small" weight="plus">
-          {t(`settings.banner.${environment}.title`)}
+          {translate(`settings.banner.${environment}.title`)}
         </Text>
-        <Text size="small">{t(`settings.banner.${environment}.body`)}</Text>
+        <Text size="small">
+          {translate(`settings.banner.${environment}.body`)}
+        </Text>
       </div>
     </div>
   )
@@ -219,17 +198,17 @@ const FieldShell = ({
         {label}
       </Label>
       <Badge size="2xsmall" color={SOURCE_BADGE_COLORS[source]}>
-        {t(`settings.sourceShort.${source}`)}
+        {translate(`settings.sourceShort.${source}`)}
       </Badge>
     </div>
     {children}
     <div className="flex flex-wrap items-center justify-between gap-2">
       <Text size="xsmall" className="text-ui-fg-subtle">
         {state === "set"
-          ? t("settings.state.pending")
+          ? translate("settings.state.pending")
           : state === "clear"
-            ? t("settings.state.willInherit")
-            : t(`settings.source.${source}`)}
+            ? translate("settings.state.willInherit")
+            : translate(`settings.source.${source}`)}
       </Text>
       {state !== "none" ? (
         <Button
@@ -239,7 +218,7 @@ const FieldShell = ({
           className="h-fit px-0"
           onClick={onUndo}
         >
-          {t("settings.action.undo")}
+          {translate("settings.action.undo")}
         </Button>
       ) : (
         // Present on every field so "clear = inherit" is discoverable; it is
@@ -252,7 +231,7 @@ const FieldShell = ({
           disabled={source !== "db"}
           onClick={onClear}
         >
-          {t("settings.action.clear")}
+          {translate("settings.action.clear")}
         </Button>
       )}
     </div>
@@ -265,7 +244,7 @@ const FieldShell = ({
 )
 
 const PaypalSettingsPage = () => {
-  const [lang, setLangState] = useState<Lang>(resolveLang)
+  const t = usePaypalT()
   const [settings, setSettings] = useState<PaypalSettingsResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -278,16 +257,6 @@ const PaypalSettingsPage = () => {
   const [envModalOpen, setEnvModalOpen] = useState(false)
   const [activeCount, setActiveCount] = useState<number | null>(null)
   const [activeCountError, setActiveCountError] = useState<string | null>(null)
-  const [historyOpen, setHistoryOpen] = useState(false)
-  const [historyLoaded, setHistoryLoaded] = useState(false)
-  const [historyLoading, setHistoryLoading] = useState(false)
-  const [historyError, setHistoryError] = useState<string | null>(null)
-  const [audits, setAudits] = useState<PaypalAuditEntry[]>([])
-
-  const switchLang = (next: Lang) => {
-    setLang(next)
-    setLangState(next)
-  }
 
   const loadSettings = useCallback(async (silent = false) => {
     if (!silent) setLoadError(null)
@@ -311,29 +280,6 @@ const PaypalSettingsPage = () => {
   useEffect(() => {
     if (Object.keys(patch).length > 0) setSaved(false)
   }, [patch])
-
-  const loadHistory = useCallback(async () => {
-    setHistoryLoading(true)
-    setHistoryError(null)
-    try {
-      const res = await sdk.client.fetch<{ audits: PaypalAuditEntry[] }>(
-        "/admin/paypal/settings/audit",
-        { query: { limit: 20 } }
-      )
-      setAudits(res.audits ?? [])
-      setHistoryLoaded(true)
-    } catch (e) {
-      setHistoryError(friendlyError(e))
-    } finally {
-      setHistoryLoading(false)
-    }
-  }, [])
-
-  const toggleHistory = () => {
-    const next = !historyOpen
-    setHistoryOpen(next)
-    if (next && !historyLoaded && !historyLoading) void loadHistory()
-  }
 
   const sourceOf = (key: EditableField): PaypalConfigSource =>
     settings ? fieldOf(settings, key).source : "none"
@@ -510,7 +456,6 @@ const PaypalSettingsPage = () => {
       setPatch({})
       setSaved(true)
       void loadSettings(true)
-      if (historyLoaded) void loadHistory()
       // Fire-and-forget: the automatic test must not block (nor roll back)
       // the save result the admin is looking at.
       void runConnectionTest(false)
@@ -552,17 +497,14 @@ const PaypalSettingsPage = () => {
                 {t("settings.subtitle")}
               </Text>
             </div>
-            <div className="flex items-center gap-2">
-              <Button
-                size="small"
-                variant="secondary"
-                disabled={loading}
-                onClick={() => void loadSettings(false)}
-              >
-                {t("common.refresh")}
-              </Button>
-              <LanguageToggle lang={lang} onSwitch={switchLang} />
-            </div>
+            <Button
+              size="small"
+              variant="secondary"
+              disabled={loading}
+              onClick={() => void loadSettings(false)}
+            >
+              {t("common.refresh")}
+            </Button>
           </div>
 
           {loading && !settings ? (
@@ -933,109 +875,6 @@ const PaypalSettingsPage = () => {
                   </div>
                 </div>
               </div>
-            </Container>
-
-            <Container className="p-0">
-              <div className="flex items-center justify-between px-6 py-4">
-                <div className="flex items-center gap-2">
-                  <Heading level="h2">
-                    {t("settings.history.heading")}
-                  </Heading>
-                  <Text size="small" className="text-ui-fg-subtle">
-                    {historyOpen
-                      ? t("settings.history.hide")
-                      : t("settings.history.show")}
-                  </Text>
-                </div>
-                <Button
-                  type="button"
-                  size="small"
-                  variant="transparent"
-                  aria-expanded={historyOpen}
-                  aria-label={t("settings.history.heading")}
-                  onClick={toggleHistory}
-                >
-                  <TriangleRightMini
-                    className={historyOpen ? "rotate-90" : undefined}
-                  />
-                </Button>
-              </div>
-              {historyOpen ? (
-                <div className="px-6 pb-4">
-                  {historyLoading ? (
-                    <Text size="small" className="text-ui-fg-subtle">
-                      {t("common.loading")}
-                    </Text>
-                  ) : null}
-                  {historyError ? (
-                    <Text size="small" className="text-ui-fg-error">
-                      {t("settings.history.loadFailed")} {historyError}
-                    </Text>
-                  ) : null}
-                  {!historyLoading && !historyError && audits.length === 0 ? (
-                    <Text size="small" className="text-ui-fg-subtle">
-                      {t("settings.history.empty")}
-                    </Text>
-                  ) : null}
-                  {!historyLoading && !historyError && audits.length > 0 ? (
-                    <Table>
-                      <Table.Header>
-                        <Table.Row>
-                          <Table.HeaderCell>
-                            {t("settings.history.actor")}
-                          </Table.HeaderCell>
-                          <Table.HeaderCell>
-                            {t("settings.history.time")}
-                          </Table.HeaderCell>
-                          <Table.HeaderCell>
-                            {t("settings.history.changes")}
-                          </Table.HeaderCell>
-                        </Table.Row>
-                      </Table.Header>
-                      <Table.Body className="divide-y divide-ui-border-base">
-                        {audits.map((entry) => {
-                          const changes = Object.entries(
-                            entry.changedFields ?? {}
-                          )
-                          return (
-                            <Table.Row key={entry.id}>
-                              <Table.Cell>
-                                <span className="font-mono text-ui-fg-subtle">
-                                  {entry.actorName ??
-                                    entry.actorId ??
-                                    t("settings.history.system")}
-                                </span>
-                              </Table.Cell>
-                              <Table.Cell>{formatDate(entry.createdAt)}</Table.Cell>
-                              <Table.Cell>
-                                <div className="flex flex-col gap-y-0.5">
-                                  {changes.map(([field, diff]) => (
-                                    <Text key={field} size="xsmall">
-                                      {fieldLabel(field)}:{" "}
-                                      <span className="text-ui-fg-subtle">
-                                        {formatAuditValue(diff?.from)}
-                                      </span>{" "}
-                                      → {formatAuditValue(diff?.to)}
-                                    </Text>
-                                  ))}
-                                  {changes.length === 0 ? (
-                                    <Text
-                                      size="xsmall"
-                                      className="text-ui-fg-subtle"
-                                    >
-                                      —
-                                    </Text>
-                                  ) : null}
-                                </div>
-                              </Table.Cell>
-                            </Table.Row>
-                          )
-                        })}
-                      </Table.Body>
-                    </Table>
-                  ) : null}
-                </div>
-              ) : null}
             </Container>
           </>
         ) : null}

@@ -1,81 +1,68 @@
 /**
- * Language resolution and error text for the admin extension pages - the copy
+ * Thin wrapper over the host dashboard's react-i18next instance. The copy
  * itself lives in the single dictionary (`src/admin/i18n/index.ts`), which the
- * host dashboard also consumes through the `virtual:medusa/i18n` convention.
- * Zero new dependencies. Language resolution is re-evaluated on every call
- * (never cached) so a language switch takes effect immediately, in order:
- *   1. `localStorage["paypal_admin_lang"]` - manual override ("en" | "zh"),
- *      written by the list page toggle;
- *   2. `localStorage["lng"]` - the host dashboard's language detector writes
- *      the admin language there (hyphenless code, Chinese is "zhCN");
- *   3. `navigator.language` starting with "zh".
- * Falls back to English. "—" placeholders are deliberately not part of the
- * dictionary.
+ * dashboard deep-merges into its own resources under the private `paypal`
+ * namespace - components resolve it with `useTranslation("paypal")`, and
+ * non-component code (route handles, module-level helpers) with `translate()`
+ * below.
+ *
+ * `react-i18next` must resolve to the dashboard's own copy: it is pinned
+ * exactly (13.5.0) in package.json because a second, uninitialised copy makes
+ * every `t()` return the raw key while core dashboard pages stay translated.
  */
-import { DICT, type Lang } from "../i18n"
+import { getI18n, useTranslation } from "react-i18next"
 
-export type { Lang }
+const NAMESPACE = "paypal"
 
-const LANG_KEY = "paypal_admin_lang"
-const HOST_LANG_KEY = "lng"
+/** The `t` returned by `usePaypalT`, for helpers that receive it as a param. */
+export type PaypalTranslate = ReturnType<typeof usePaypalT>
 
-/** Resolve the display language at call time (see the module docblock). */
-export const resolveLang = (): Lang => {
-  const override = localStorage.getItem(LANG_KEY)
-  if (override === "en" || override === "zh") return override
-  const host = localStorage.getItem(HOST_LANG_KEY)
-  if (host) return host.toLowerCase().startsWith("zh") ? "zh" : "en"
-  const nav = typeof navigator !== "undefined" ? navigator.language : ""
-  return (nav || "").toLowerCase().startsWith("zh") ? "zh" : "en"
-}
+/** The `t` bound to the `paypal` namespace, for React components. */
+export const usePaypalT = () => useTranslation(NAMESPACE).t
 
-/** Persist the manual language override (list page toggle). */
-export const setLang = (lang: Lang): void => {
-  localStorage.setItem(LANG_KEY, lang)
-}
-
-/** Look up a dictionary key with {name} placeholder substitution. */
-export const t = (
+/**
+ * Reads a translation outside a React component, where hooks are unavailable.
+ * Falls back to the key itself if the dashboard i18n instance is not ready yet
+ * (route modules evaluate at import time).
+ */
+export const translate = (
   key: string,
-  vars?: Record<string, string | number>
+  options?: Record<string, unknown>
 ): string => {
-  const entry = DICT[key]
-  let text = entry ? entry[resolveLang()] : key
-  if (vars) {
-    text = text.replace(/\{(\w+)\}/g, (match, name: string) =>
-      Object.prototype.hasOwnProperty.call(vars, name)
-        ? String(vars[name])
-        : match
-    )
-  }
-  return text
+  const i18n = getI18n()
+  if (!i18n) return key
+  return i18n.t(key, { ns: NAMESPACE, ...options })
 }
 
 /** Localized status label; unknown statuses keep the space-ized raw text. */
 export const statusLabel = (status: string | null | undefined): string => {
   if (!status) return "—"
-  const key = `status.${status}`
-  return DICT[key] ? t(key) : status.replace(/_/g, " ")
+  return translate(`status.${status}`, {
+    defaultValue: status.replace(/_/g, " "),
+  })
 }
 
 /** Localized billing period unit; unknown units keep the raw text. */
-export const unitLabel = (unit: string): string => {
-  const key = `period.unit.${unit}`
-  return DICT[key] ? t(key) : unit
-}
+export const unitLabel = (unit: string): string =>
+  translate(`period.unit.${unit}`, { defaultValue: unit })
 
-/** Intl locale tag following the selected language ("en-US" / "zh-CN"). */
+/** Intl locale tag following the dashboard language ("en-US" / "zh-CN"). */
 export const localeTag = (): string =>
-  resolveLang() === "zh" ? "zh-CN" : "en-US"
+  (getI18n()?.language ?? "").toLowerCase().startsWith("zh")
+    ? "zh-CN"
+    : "en-US"
 
 /**
  * Catch-branch error text: js-sdk's FetchError carries a `status` field - a
  * 401 means the admin session has expired and gets a friendly message
- * instead of the raw "Unauthorized".
+ * instead of the raw "Unauthorized". Components may pass their `t`; without
+ * one the module-level `translate` is used.
  */
-export const friendlyError = (e: unknown): string => {
+export const friendlyError = (e: unknown, t?: PaypalTranslate): string => {
   if (typeof e === "object" && e !== null && "status" in e) {
-    if ((e as { status?: number }).status === 401) return t("error.session401")
+    if ((e as { status?: number }).status === 401) {
+      return t ? t("error.session401") : translate("error.session401")
+    }
   }
   return e instanceof Error ? e.message : String(e)
 }

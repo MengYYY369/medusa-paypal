@@ -29,19 +29,16 @@ import {
 } from "../../../lib/enrich"
 import {
   friendlyError,
-  resolveLang,
-  setLang,
   statusLabel,
-  t,
-  type Lang,
+  usePaypalT,
 } from "../../../lib/i18n"
-import { LanguageToggle } from "../../../lib/lang-toggle"
 
 const PAGE_SIZE = 20
 
 const FILTERS = ["ALL", ...SUBSCRIPTION_STATUSES] as const
 
 const SubscriptionListPage = () => {
+  const t = usePaypalT()
   const [rows, setRows] = useState<SubscriptionRow[]>([])
   const [count, setCount] = useState(0)
   const [offset, setOffset] = useState(0)
@@ -50,14 +47,6 @@ const SubscriptionListPage = () => {
   const [error, setError] = useState<string | null>(null)
   const [customers, setCustomers] = useState<Record<string, CustomerInfo>>({})
   const [variants, setVariants] = useState<Record<string, VariantInfo>>({})
-  // Language state exists to re-render on toggle; t() resolves the language
-  // fresh on every call. The detail page follows this via localStorage.
-  const [lang, setLangState] = useState<Lang>(resolveLang)
-
-  const switchLang = (next: Lang) => {
-    setLang(next)
-    setLangState(next)
-  }
 
   const load = useCallback(
     async (opts: { status: string; offset: number }) => {
@@ -126,10 +115,9 @@ const SubscriptionListPage = () => {
           <div>
             <Heading level="h1">{t("app.title")}</Heading>
             <Text size="small" className="text-ui-fg-subtle">
-              {loading ? t("common.loading") : t("list.count", { count })}
+              {loading ? t("common.loading") : t("list.count", { total: count })}
             </Text>
           </div>
-          <LanguageToggle lang={lang} onSwitch={switchLang} />
         </div>
         <div className="flex flex-wrap items-center gap-1.5 px-6 pb-4">
           {FILTERS.map((f) => {
