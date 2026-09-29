@@ -39,6 +39,7 @@ npm list @medusajs/medusa
 - [🔁 Vaulted Auto-Renewals](#-vaulted-auto-renewals)
 - [⭐ PayPal Subscriptions (Billing Plans)](#-paypal-subscriptions-billing-plans)
 - [⚙️ Plugin Options](#-plugin-options)
+- [🛠 Admin Configuration](#-admin-configuration)
 - [📖 Documentation](#-documentation)
 
 ---
@@ -242,8 +243,9 @@ provider you already registered:
 }
 ```
 
-The plugin ships a small `paypalSubscription` module (two tables:
-`paypal_plan`, `paypal_subscription`) that is registered automatically - just
+The plugin ships a small `paypalSubscription` module (four tables:
+`paypal_plan`, `paypal_subscription`, `paypal_settings`,
+`paypal_settings_audit`) that is registered automatically - just
 run `medusa db:migrate` after installing. Without this line nothing changes:
 regular and vault checkouts are untouched.
 
@@ -262,7 +264,7 @@ Subscribe it to these event types only:
 - `BILLING.SUBSCRIPTION.SUSPENDED`
 - `BILLING.SUBSCRIPTION.CANCELLED`
 - `BILLING.SUBSCRIPTION.EXPIRED`
-- `BILLING.SUBSCRIPTION.PAYMENT.FAILED` (verify the exact type in sandbox; `PAYMENT.SALE.DENIED` is also handled)
+- `BILLING.SUBSCRIPTION.PAYMENT.FAILED` (verify the exact type in sandbox; `PAYMENT.SALE.DENIED` and `PAYMENT.SALE.DECLINED` are also handled - tick them too)
 - `PAYMENT.SALE.COMPLETED`
 - `PAYMENT.SALE.REFUNDED` / `PAYMENT.SALE.REVERSED` (fallback; see refunds below)
 
@@ -272,11 +274,32 @@ plugin ignores any `PAYMENT.CAPTURE.*` delivered here, so a stray checkbox is
 harmless.)
 
 > **Note on the standard payment webhook:** point it at
-> `https://<your-backend>/hooks/payment/paypal` (the path segment is the
-> provider id **without** the `pp_` prefix - Medusa prepends it internally)
-> and make sure `PAYMENT.CAPTURE.REFUNDED` + `PAYMENT.CAPTURE.REVERSED` are
-> subscribed there: they are the events PayPal actually fires for panel
-> refunds of subscription charges, and they drive the refund sync.
+> `https://<your-backend>/hooks/payment/<registration-key-minus-pp_>`.
+> Medusa's payment module registers every provider as `pp_` + the provider
+> identifier + (`_` + the entry's `id` when the config sets one), and when a
+> webhook event is dispatched the module prepends `pp_` to the path segment -
+> so the segment is that key **without** the leading `pp_`. Concretely: with no
+> `id` in the provider entry the key is `pp_paypal` and the URL ends in
+> `/hooks/payment/paypal`; **with the `id: "paypal"` this README's own options
+> example uses, the key is `pp_paypal_paypal` and the URL ends in
+> `/hooks/payment/paypal_paypal`.** Check the key your host registers before
+> pasting the URL: the route answers 200 either way, so a wrong segment is
+> invisible to PayPal's dashboard and only surfaces in the backend logs as a
+> provider-resolution error.
+>
+> Subscribe it to the capture-class events the provider maps:
+>
+> - `PAYMENT.CAPTURE.COMPLETED` - the captured mechanism; also the
+>   first-period charge of a subscription.
+> - `PAYMENT.CAPTURE.DECLINED` - declines, surfaced as a failed webhook action. (The provider maps `PAYMENT.CAPTURE.DECLINED`, not `DENIED`.)
+> - `PAYMENT.CAPTURE.REFUNDED` and `PAYMENT.CAPTURE.REVERSED` - **required**:
+>   these are the events PayPal actually fires for panel refunds of
+>   subscription charges, and they drive the refund sync (`PAYMENT.SALE.REFUNDED`
+>   is not emitted for them).
+>
+> Everything else in `PAYMENT.CAPTURE.*` maps to `not_supported`, so ticking
+> more is harmless but unnecessary. Do not tick `BILLING.SUBSCRIPTION.*` or
+> `PAYMENT.SALE.*` here - they belong to the subscription webhook below.
 
 Then pass its webhook id as `subscriptionWebhookId` (falls back to
 `webhookId` when omitted). Signature verification tries both ids, so even a
@@ -328,10 +351,12 @@ charge; the actually-charged amount and currency ride on the
   - `GET /admin/paypal/subscriptions/:id`
   - `POST /admin/paypal/subscriptions/:id/actions` with `{ "action": "cancel" | "suspend" | "resume" }`
   - `POST /admin/paypal/plans/sync` with `{ "variant_id", "currency_code" }` - pre-create or inspect the cached plan
-- **Admin UI** (ships with the package, no extra setup): a
-  **"PayPal Subscriptions"** entry appears in the Medusa admin sidebar (after
-  updating the plugin, rebuild the host admin - `medusa build` or restart
-  `medusa develop`).
+- **Admin UI** (ships with the package, no extra setup): the Medusa admin
+  sidebar shows a **PayPal** entry (the configuration page at `/paypal`) with
+  **PayPal Subscriptions** as its child (`/paypal/subscriptions`; details at
+  `/paypal/subscriptions/:id`). After updating the plugin, rebuild the host
+  admin - `medusa build` or restart `medusa develop`. The old
+  `/paypal-subscriptions*` URLs no longer exist.
   - **List page**: filter by status (chips for `APPROVAL_PENDING` / `ACTIVE` /
     `SUSPENDED` / `CANCELLED` / `EXPIRED`), paginate (newest first), and scan
     key columns - PayPal subscription id, status badge, customer email,
@@ -402,9 +427,9 @@ The following options can be passed to the PayPal plugin in your `medusa-config.
 
 | Option                | Type      | Default | Description                                                                                     |
 | --------------------- | --------- | ------- | ----------------------------------------------------------------------------------------------- |
-| `clientId`            | `string`  |         | Required. Your PayPal API client ID.                                                            |
-| `clientSecret`        | `string`  |         | Required. Your PayPal API client secret.                                                        |
-| `isSandbox`           | `boolean` | `true`  | Whether to use the PayPal Sandbox environment for testing.                                      |
+| `clientId`            | `string`  |         | Optional. Your PayPal API client ID. Omit both credentials to configure from the admin settings page. |
+| `clientSecret`        | `string`  |         | Optional. Your PayPal API client secret. Omit both credentials to configure from the admin settings page. |
+| `isSandbox`           | `boolean` | `false` | Whether to use the PayPal Sandbox environment for testing.                                      |
 | `webhookId`           | `string`  |         | Optional. Your PayPal webhook ID. If provided, enables confirmation of payment captures.        |
 | `subscriptionWebhookId` | `string` |        | Optional. Webhook ID of the second (subscription) webhook; falls back to `webhookId`.           |
 | `includeShippingData` | `boolean` | `false` | Optional. If `true`, shipping data from the storefront order will be added to the PayPal order. |
@@ -412,13 +437,103 @@ The following options can be passed to the PayPal plugin in your `medusa-config.
 | `autoBillOutstanding` | `boolean` | `true`  | Optional. Subscription plan payment preference: bill outstanding balances automatically.        |
 | `paymentFailureThreshold` | `number` | `3`  | Optional. Subscription plan payment preference: failed attempts before PayPal suspends.         |
 
-**Credential fallback**: when an option is not passed explicitly, the service
-falls back to the matching environment variable — `PAYPAL_CLIENT_ID`,
-`PAYPAL_CLIENT_SECRET`, `PAYPAL_IS_SANDBOX`, `PAYPAL_WEBHOOK_ID`,
-`PAYPAL_SUBSCRIPTION_WEBHOOK_ID` — so routes and modules that construct the
-service outside the provider container (e.g. the subscription webhook route)
-never run with empty credentials (`Basic Og==`). Explicit options always win
-over environment variables.
+**Configuration layers**: as of 0.7.0 the plugin reads configuration from
+exactly two layers — the `medusa-config` options above and the admin settings
+page (runtime overrides stored in the plugin's database tables). There is no
+environment-variable fallback: an option you do not set in `medusa-config`
+either comes from the admin settings row or stays unset. The admin layer wins
+field by field; see [Admin Configuration](#-admin-configuration) below.
+
+---
+
+## 🛠 Admin Configuration
+
+The Medusa admin sidebar has a **PayPal** entry that opens the configuration
+page at `/paypal`. The page edits the nine provider options in four groups
+(credentials / environment / webhooks / advanced), shows read-only integration
+info (both webhook callback URLs, the reconciliation cron, the last change and
+the last credential check) and the most recent change history. Its child entry
+**PayPal Subscriptions** (`/paypal/subscriptions`, details at
+`/paypal/subscriptions/:id`) is the subscription list that used to live at
+`/paypal-subscriptions`. The old `/paypal-subscriptions*` URLs are gone and
+return 404 — update bookmarks.
+
+### Upgrading to 0.7.0
+
+Run the plugin's migrations once after installing the new version:
+
+```bash
+npx medusa db:migrate
+```
+
+This creates `paypal_settings` (the single row of admin overrides) and
+`paypal_settings_audit` (the field-level change history) inside the existing
+`paypalSubscription` module. Until the migration has run, reads degrade with a
+warning and keep using the `medusa-config` values (payments do not break), but
+saving from the admin page fails with a clear error: HTTP 400 naming the
+missing `paypal_settings` table and telling you to run `npx medusa db:migrate`.
+
+### Inheritance and hot reload
+
+Each field is resolved independently, in this order:
+
+```
+admin settings (DB) -> payment provider options -> plugins[].options
+```
+
+A field with no admin override inherits from `medusa-config`, and the settings
+page shows which layer currently provides each value. Clearing a field in the
+admin removes the override and restores inheritance. Changes take effect
+immediately — no restart and no rebuild — because the plugin re-resolves the
+configuration on every operation and rebuilds its PayPal client and
+subscription engine when the stored settings version changes.
+
+`clientId` and `clientSecret` are optional at boot: with neither set the plugin
+starts with a warning and stays unconfigured until you fill them in on the
+settings page; with exactly one set it refuses to start (a typo guard). Any
+PayPal call without credentials now fails with a clear "PayPal is not
+configured" error instead of a PayPal 401.
+
+### Connection test
+
+The page's **test connection** button and its post-save automatic check call
+`POST /admin/paypal/settings/verify` (the route directory is `verify`, not
+`test`: the plugin compiler prunes any path containing a `test` segment). An
+empty body tests the stored configuration and records the outcome as the last
+credential check; draft `clientId` / `clientSecret` / `isSandbox` values in the
+body test those overrides without touching the saved row. The endpoint answers
+`{ ok, environment, error?, durationMs }` and never echoes the secret.
+
+### Escape hatch
+
+If a bad admin configuration breaks payments, set `PAYPAL_IGNORE_DB_SETTINGS`
+to a truthy value (`1`, `true`, `yes`, `on`) and restart the container. The
+resolver then ignores the database layer entirely and behaves as if no override
+existed — i.e. exactly the `medusa-config` state from before the admin edit.
+Unset it to re-enable the overrides.
+
+### Storefront runtime config
+
+`GET /store/paypal/config` is a read-only endpoint that returns the effective
+configuration without calling PayPal:
+
+```json
+{ "client_id": "AaBbCc...", "environment": "sandbox", "configured": true }
+```
+
+`environment` is `"sandbox"` or `"production"`. When the credentials are
+missing it still answers HTTP 200 with `client_id: null` and
+`configured: false` — unconfigured is a normal state, not an error. The
+response carries `Cache-Control: no-store`, and like every `/store` route it
+requires the host's publishable key (but no customer authentication).
+
+A storefront can fetch this endpoint at runtime and pass `client_id` and
+`environment` to `PayPalScriptProvider`; because `@paypal/react-paypal-js`
+reads its options only at mount, fetch the config first and mount the provider
+afterwards (or remount it with a `key`). This removes the need for a build-time
+`NEXT_PUBLIC_PAYPAL_CLIENT_ID` and keeps the checkout buttons in sync with
+whatever environment and client id the admin page currently holds — no
+storefront rebuild required.
 
 ---
 
@@ -489,7 +604,7 @@ export const PayPalPayment = ({ cart, onPaymentCompleted }) => {
       const response = await sdk.client.fetch("/store/paypal/client-token", {
         method: "POST",
       });
-      setClientToken(response.clientToken);
+      setClientToken(response.client_token);
     };
     fetchClientToken();
   }, []);

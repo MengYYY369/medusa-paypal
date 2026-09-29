@@ -5,15 +5,117 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-09-29
+
+### Added
+
+- **Admin configuration page** at `/paypal`: the sidebar now has a **PayPal**
+  parent entry whose page edits the nine provider options in four groups
+  (credentials / environment / webhooks / advanced), shows read-only
+  integration info (both webhook callback URLs, the reconciliation cron, the
+  last change and the last credential check) and the last 20 field-level audit
+  entries. Inherited fields render the `medusa-config` value as a grey
+  placeholder plus a badge naming the source layer, and clearing a field
+  restores inheritance. `clientSecret` is never returned by the API - only
+  `hasSecret` and its last 4 characters. Saving runs an automatic connection
+  test (fire-and-forget: it never blocks or rolls back the save) and a
+  separate button tests draft values; the result is stored and shown.
+- **Settings storage**: `paypal_settings` (singleton row of nullable
+  field-level overrides plus a `version` that increments on every write) and
+  `paypal_settings_audit` (per-write `{ field: { from, to } }` diff, secret
+  values masked), created inside the existing `paypalSubscription` module.
+  **Upgrading requires `npx medusa db:migrate`.** Until the migration runs,
+  reads degrade with a warning and keep using the `medusa-config` values
+  (payments do not break), while saves fail with a clear error.
+- **Runtime config endpoint** `GET /store/paypal/config` ->
+  `{ client_id, environment, configured }`: read-only, never calls PayPal,
+  `Cache-Control: no-store`, scoped by the host publishable key like every
+  `/store` route and requiring no customer authentication. Unconfigured answers
+  200 with `client_id: null` / `configured: false`, so a storefront can render
+  a disabled state; storefronts can read the client id and environment at
+  runtime instead of baking `NEXT_PUBLIC_PAYPAL_CLIENT_ID` in at build time.
+- **Hot reload**: a single resolver (per-field merge, keyed on the settings row
+  version) is now the only configuration source, and the provider and module
+  rebuild their PayPal client / subscription engine when the version or the
+  resolved values change. Admin edits take effect immediately, with no
+  restart.
+- **Ops escape hatch** `PAYPAL_IGNORE_DB_SETTINGS` (truthy values `1`, `true`,
+  `yes`, `on`): the resolver skips the DB layer entirely, so restarting the
+  container with it set rolls back to the `medusa-config` state from before
+  the admin edit.
 
 ### Changed
 
-- **The sidebar entry follows the dashboard language**: the route config now
-  declares `translationNs` with the label as a key, and `src/admin/i18n/index.ts`
-  registers the plugin's `paypal` namespace (`virtual:medusa/i18n`), so the
-  sidebar shows "PayPal Subscriptions" in English and "PayPal 订阅" in Chinese.
-  The English value is a byte-for-byte copy of the previous label.
+- **Configuration resolution is now per-field
+  `admin settings (DB) -> payment provider options -> plugins[].options`**.
+  An unset admin field inherits from the next layer, preserving both existing
+  config surfaces unchanged; clearing a field removes its override.
+- **`clientId` / `clientSecret` are optional at boot**: with neither set the
+  plugin starts with a warning and can be configured from the admin page; with
+  exactly one set it still refuses to start (typo guard). Every PayPal call
+  without credentials now throws a clear "PayPal is not configured" error
+  instead of a PayPal 401.
+- **The module-side default environment converges to production**
+  (`isSandbox: false`) when no layer sets it, matching the provider schema;
+  the `paypalSubscription` module previously defaulted to sandbox. The
+  client-token route derives its environment and REST base from the resolved
+  config instead of `process.env.PAYPAL_SANDBOX`.
+- **The plan cache hash now includes the environment** (`planConfigHash`), so
+  a plan minted in sandbox is not reused in live. **Upgrade side effect**: the
+  first checkout after upgrading mints one new plan per variant + currency in
+  the current environment (the existing rows' hashes no longer match).
+  Existing subscriptions keep their old plan and renew normally.
+- **The sidebar label follows the dashboard language** (absorbed from the
+  unreleased 0.6.2): the route configs declare `translationNs` and
+  `src/admin/i18n/index.ts` registers the plugin's `paypal` namespace
+  (`virtual:medusa/i18n`), so the sidebar shows "PayPal Subscriptions" in
+  English and "PayPal 订阅" in Chinese. The English value is a byte-for-byte
+  copy of the previous label.
+
+### Fixed
+
+- **The plugin no longer ships the never-loaded `src/api/middleware.ts`**
+  (singular): the framework's middleware loader only probes `middlewares.ts` /
+  `middlewares.js`, so the file was dead code. It is now
+  `src/api/middlewares.ts`; besides hosting the new settings API validation,
+  the rename restores `preserveRawBody: true` for
+  `POST /hooks/paypal/subscriptions`, so the emitted `WebhookReceived` payload
+  carries `rawData` like the standard payment webhook (signature verification
+  was unaffected).
+- **The connection-test endpoint actually reaches the build**: it is now
+  `POST /admin/paypal/settings/verify`, renamed from
+  `POST /admin/paypal/settings/test`. The framework's plugin compiler prunes
+  any path containing a `test` segment
+  (`_Compiler_backendIgnoreFiles`), so the old route was silently dropped from
+  `.medusa/server` and every host answered 404 - the page's test button and
+  the post-save auto-verification were dead, and `lastVerified*` could never
+  be written. The handler behaviour is unchanged; the admin page, the
+  middleware validator and the docs were updated to the new URL.
+- **A missing `paypal_settings` table now fails the write readably**: saving
+  settings (or recording a verification) before `npx medusa db:migrate` used
+  to answer the framework's generic `500 {"code":"unknown_error"}` while only
+  the log held the real `relation "paypal_settings" does not exist`. The write
+  path now translates exactly that failure into a `400 invalid_data` naming
+  the table and telling the operator to run `npx medusa db:migrate`; every
+  other error still propagates unchanged, and the read path keeps degrading
+  silently as before.
+- **`POST /store/paypal/client-token` no longer 404s on hosts that register
+  the provider without an explicit `id`**: it looked the provider up with an
+  inline `provider.id === "paypal"` check, so a declaration keyed as
+  `pp_paypal` (the common case - no `id` in `medusa-config`) answered
+  `404 {"error":"Paypal provider not found"}`. It now uses the shared
+  `findPaypalProviderDeclaration` lookup (which also accepts
+  `resolve.includes("paypal")`) like every other consumer. This is a
+  pre-existing defect, not a 0.7.0 regression.
+
+### Breaking
+
+- **Admin URLs moved**: subscriptions are now at `/paypal/subscriptions` and
+  `/paypal/subscriptions/:id`; the old `/paypal-subscriptions*` URLs return
+  404. Update bookmarks and hard-coded admin links.
+- **Deployments must run `npx medusa db:migrate`**: without it the admin
+  settings page cannot save, and settings reads log a warning while payments
+  continue on the `medusa-config` values.
 
 ## [0.6.1] - 2026-09-27
 
