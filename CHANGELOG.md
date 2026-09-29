@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-09-29
+
+### Changed
+
+- **The admin extension now uses the dashboard's own i18n.** Page copy is
+  translated through the admin's `react-i18next` instance (namespace `paypal`),
+  so it follows the language each admin user selects in their profile. The
+  plugin's own `EN | 中文` toggle, its `paypal_admin_lang` localStorage override
+  and its language-detection chain are gone. `react-i18next@13.5.0` is pinned as
+  a peer dependency - the import must resolve to the instance
+  `@medusajs/dashboard` initialises, otherwise every `t()` returns raw keys.
+- **"Change history" is now "Audit log" on its own page.** The collapsible
+  section at the bottom of `/paypal` moved to a new sidebar child
+  `/paypal/audit`, which lists 50 entries by default with a **Load more** button
+  (the endpoint caps `limit` at 100) and a refresh button.
+
+### Added
+
+- **`/paypal/audit` admin route** - the field-level audit trail (actor,
+  timestamp, `old → new` per field, secrets masked to their last 4 characters).
+
+### Notes
+
+- Upgrading from 0.7.0 needs **no** database migration.
+- Admin URLs are unchanged; only a new child route was added under `/paypal`.
+
 ## [0.7.0] - 2026-09-29
 
 ### Added

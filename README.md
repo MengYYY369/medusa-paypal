@@ -353,10 +353,12 @@ charge; the actually-charged amount and currency ride on the
   - `POST /admin/paypal/plans/sync` with `{ "variant_id", "currency_code" }` - pre-create or inspect the cached plan
 - **Admin UI** (ships with the package, no extra setup): the Medusa admin
   sidebar shows a **PayPal** entry (the configuration page at `/paypal`) with
-  **PayPal Subscriptions** as its child (`/paypal/subscriptions`; details at
-  `/paypal/subscriptions/:id`). After updating the plugin, rebuild the host
-  admin - `medusa build` or restart `medusa develop`. The old
-  `/paypal-subscriptions*` URLs no longer exist.
+  **PayPal Subscriptions** (`/paypal/subscriptions`; details at
+  `/paypal/subscriptions/:id`) and **Audit log** (`/paypal/audit`) as its
+  children. Every extension page follows the language the admin user picked in
+  their dashboard profile - the plugin ships no language switcher of its own.
+  After updating the plugin, rebuild the host admin - `medusa build` or restart
+  `medusa develop`. The old `/paypal-subscriptions*` URLs no longer exist.
   - **List page**: filter by status (chips for `APPROVAL_PENDING` / `ACTIVE` /
     `SUSPENDED` / `CANCELLED` / `EXPIRED`), paginate (newest first), and scan
     key columns - PayPal subscription id, status badge, customer email,
@@ -452,11 +454,14 @@ The Medusa admin sidebar has a **PayPal** entry that opens the configuration
 page at `/paypal`. The page edits the nine provider options in four groups
 (credentials / environment / webhooks / advanced), shows read-only integration
 info (both webhook callback URLs, the reconciliation cron, the last change and
-the last credential check) and the most recent change history. Its child entry
-**PayPal Subscriptions** (`/paypal/subscriptions`, details at
-`/paypal/subscriptions/:id`) is the subscription list that used to live at
-`/paypal-subscriptions`. The old `/paypal-subscriptions*` URLs are gone and
-return 404 — update bookmarks.
+the last credential check) and each field's inheritance source. Its two child
+entries are **PayPal Subscriptions** (`/paypal/subscriptions`, details at
+`/paypal/subscriptions/:id`) - the subscription list that used to live at
+`/paypal-subscriptions` - and **Audit log** (`/paypal/audit`), the field-level
+change trail (who / when / which fields / old → new, with secrets masked to
+their last 4 characters). The old `/paypal-subscriptions*` URLs are gone and
+return 404 — update bookmarks. All three pages are bilingual and follow the
+language the admin user selects in their dashboard profile.
 
 ### Upgrading to 0.7.0
 
