@@ -729,4 +729,31 @@ describe("PaypalModuleService (resolved configuration)", () => {
       webhookId: "webhook-subscription",
     })
   })
+
+  it("verifies with the subscription webhook id edited after boot", async () => {
+    const h = createProviderWithResolver()
+
+    h.bump({ subscriptionWebhookId: "webhook-subscription-v2" })
+
+    const verifySpy = jest
+      .spyOn(await clientOf(h.provider), "verifyWebhook")
+      .mockRejectedValueOnce(new Error("primary id rejected"))
+      .mockResolvedValueOnce({ status: "SUCCESS", body: {} } as never)
+
+    const result = await h.provider.getWebhookActionAndData({
+      data: {
+        event_type: "PAYMENT.CAPTURE.COMPLETED",
+        resource: {
+          custom_id: "sess_1",
+          amount: { value: "10.50", currency_code: "USD" },
+        },
+      },
+      headers: {},
+    } as never)
+
+    expect(result).toMatchObject({ action: "captured" })
+    expect(verifySpy.mock.calls[1][0]).toMatchObject({
+      webhookId: "webhook-subscription-v2",
+    })
+  })
 })
