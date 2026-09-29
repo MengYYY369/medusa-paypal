@@ -1,6 +1,6 @@
 import PaypalModuleService from "../service"
 import { PaypalService } from "../paypal-core/paypal-core"
-import { PaymentSessionStatus } from "@medusajs/framework/utils"
+import { MedusaError, PaymentSessionStatus } from "@medusajs/framework/utils"
 
 const loggerStub = {
   warn: jest.fn(),
@@ -22,22 +22,68 @@ function createProvider() {
   )
 }
 
-function clientOf(provider: PaypalModuleService): PaypalService {
-  return (provider as unknown as { client: PaypalService }).client
+/**
+ * The provider builds its client lazily from the resolved config, so tests
+ * obtain it through the same accessor every call site uses.
+ */
+async function clientOf(provider: PaypalModuleService): Promise<PaypalService> {
+  return (provider as unknown as { getClient(): Promise<PaypalService> }).getClient()
 }
 
 describe("PaypalModuleService (baseline behavior)", () => {
   describe("validateOptions", () => {
-    it("throws when clientId is missing", () => {
+    const baseOptions = {
+      isSandbox: true,
+      includeShippingData: false,
+      includeCustomerData: false,
+    }
+
+    it("boots with a warning when both credentials are missing", () => {
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {})
+
+      expect(() =>
+        PaypalModuleService.validateOptions({ ...baseOptions })
+      ).not.toThrow()
+
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(warnSpy.mock.calls[0][0]).toMatch(/unconfigured/)
+      expect(warnSpy.mock.calls[0][0]).toMatch(/admin PayPal settings page/)
+
+      warnSpy.mockRestore()
+    })
+
+    it("treats empty and whitespace-only credentials as missing too", () => {
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {})
+
       expect(() =>
         PaypalModuleService.validateOptions({
+          ...baseOptions,
+          clientId: "   ",
+          clientSecret: "",
+        })
+      ).not.toThrow()
+
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+
+      warnSpy.mockRestore()
+    })
+
+    it("throws when exactly one credential is missing", () => {
+      expect(() =>
+        PaypalModuleService.validateOptions({
+          ...baseOptions,
           clientId: "",
           clientSecret: "secret",
-          isSandbox: true,
-          includeShippingData: false,
-          includeCustomerData: false,
         })
-      ).toThrow()
+      ).toThrow(/clientId is missing/)
+
+      expect(() =>
+        PaypalModuleService.validateOptions({
+          ...baseOptions,
+          clientId: "id",
+          clientSecret: "   ",
+        })
+      ).toThrow(/clientSecret is missing/)
     })
 
     it("accepts a minimal valid options object", () => {
@@ -45,11 +91,34 @@ describe("PaypalModuleService (baseline behavior)", () => {
         PaypalModuleService.validateOptions({
           clientId: "id",
           clientSecret: "secret",
+          ...baseOptions,
+        })
+      ).not.toThrow()
+    })
+  })
+
+  describe("runtime configuration guard", () => {
+    it("refuses PayPal calls with a configuration error when unconfigured", async () => {
+      const provider = new PaypalModuleService(
+        { logger: loggerStub as never, paymentModuleService: {} },
+        {
           isSandbox: true,
           includeShippingData: false,
           includeCustomerData: false,
-        })
-      ).not.toThrow()
+        } as never
+      )
+
+      await expect(
+        provider.initiatePayment({
+          amount: 1050,
+          currency_code: "usd",
+          context: {},
+          data: {},
+        } as never)
+      ).rejects.toMatchObject({
+        type: MedusaError.Types.INVALID_DATA,
+        message: expect.stringContaining("PayPal is not configured"),
+      })
     })
   })
 
@@ -57,7 +126,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
     it("returns captured without an API call when already completed", async () => {
       const provider = createProvider()
       const captureSpy = jest
-        .spyOn(clientOf(provider), "captureOrder")
+        .spyOn(await clientOf(provider), "captureOrder")
         .mockResolvedValue({ id: "ORDER-1" } as never)
 
       const result = await provider.capturePayment({
@@ -71,7 +140,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
     it("captures the PayPal order and returns captured", async () => {
       const provider = createProvider()
       jest
-        .spyOn(clientOf(provider), "captureOrder")
+        .spyOn(await clientOf(provider), "captureOrder")
         .mockResolvedValue({ id: "ORDER-1", status: "COMPLETED" } as never)
 
       const result = await provider.capturePayment({
@@ -79,7 +148,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
       } as never)
 
       expect(result.data?.status).toBe(PaymentSessionStatus.CAPTURED)
-      expect(clientOf(provider).captureOrder).toHaveBeenCalledWith("ORDER-1")
+      expect((await clientOf(provider)).captureOrder).toHaveBeenCalledWith("ORDER-1")
     })
 
     it("throws invalid data when the PayPal order id is missing", async () => {
@@ -95,7 +164,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
     it("creates a PayPal order for the major-unit amount and returns its id", async () => {
       const provider = createProvider()
       const createSpy = jest
-        .spyOn(clientOf(provider), "createOrder")
+        .spyOn(await clientOf(provider), "createOrder")
         .mockResolvedValue({ id: "PAYPAL-1", status: "CREATED" } as never)
 
       const result = await provider.initiatePayment({
@@ -124,7 +193,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
   describe("authorizePayment", () => {
     it("authorizes a captured order", async () => {
       const provider = createProvider()
-      jest.spyOn(clientOf(provider), "captureOrder").mockResolvedValue({
+      jest.spyOn(await clientOf(provider), "captureOrder").mockResolvedValue({
         id: "ORDER-1",
         purchaseUnits: [
           { payments: { captures: [{ status: "COMPLETED", id: "CAP-1" }] } },
@@ -158,10 +227,10 @@ describe("PaypalModuleService (baseline behavior)", () => {
         }),
       })
       jest
-        .spyOn(clientOf(provider), "captureOrder")
+        .spyOn(await clientOf(provider), "captureOrder")
         .mockRejectedValue(err as never)
       jest
-        .spyOn(clientOf(provider), "createOrder")
+        .spyOn(await clientOf(provider), "createOrder")
         .mockResolvedValue({ id: "ORDER-2", status: "CREATED" } as never)
 
       const result = await provider.authorizePayment({
@@ -184,7 +253,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
     it("maps a completed order to captured", async () => {
       const provider = createProvider()
       jest
-        .spyOn(clientOf(provider), "retrieveOrder")
+        .spyOn(await clientOf(provider), "retrieveOrder")
         .mockResolvedValue({ id: "ORDER-1", status: "COMPLETED" } as never)
 
       const result = await provider.getPaymentStatus({
@@ -199,7 +268,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
     it("maps PAYMENT.CAPTURE.COMPLETED to captured", async () => {
       const provider = createProvider()
       jest
-        .spyOn(clientOf(provider), "verifyWebhook")
+        .spyOn(await clientOf(provider), "verifyWebhook")
         .mockResolvedValue({ status: "SUCCESS", body: {} })
 
       const result = await provider.getWebhookActionAndData({
@@ -223,7 +292,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
     it("returns not_supported for unknown event types", async () => {
       const provider = createProvider()
       jest
-        .spyOn(clientOf(provider), "verifyWebhook")
+        .spyOn(await clientOf(provider), "verifyWebhook")
         .mockResolvedValue({ status: "SUCCESS", body: {} })
 
       const result = await provider.getWebhookActionAndData({
@@ -240,7 +309,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
     it("maps PAYMENT.CAPTURE.DECLINED to a failed action", async () => {
       const provider = createProvider()
       jest
-        .spyOn(clientOf(provider), "verifyWebhook")
+        .spyOn(await clientOf(provider), "verifyWebhook")
         .mockResolvedValue({ status: "SUCCESS", body: {} })
 
       const result = await provider.getWebhookActionAndData({
@@ -264,7 +333,7 @@ describe("PaypalModuleService (baseline behavior)", () => {
     it("never acts on events that fail signature verification", async () => {
       const provider = createProvider()
       jest
-        .spyOn(clientOf(provider), "verifyWebhook")
+        .spyOn(await clientOf(provider), "verifyWebhook")
         .mockRejectedValue(new Error("verification_status FAILURE"))
 
       const result = await provider.getWebhookActionAndData({
@@ -288,7 +357,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
     it("passes the merchant customer id to the order when the session opts into vaulting", async () => {
       const provider = createProvider()
       const createSpy = jest
-        .spyOn(clientOf(provider), "createOrder")
+        .spyOn(await clientOf(provider), "createOrder")
         .mockResolvedValue({ id: "PAYPAL-1", status: "CREATED" } as never)
 
       await provider.initiatePayment({
@@ -306,7 +375,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
     it("does not opt into vaulting without a customer id", async () => {
       const provider = createProvider()
       const createSpy = jest
-        .spyOn(clientOf(provider), "createOrder")
+        .spyOn(await clientOf(provider), "createOrder")
         .mockResolvedValue({ id: "PAYPAL-1", status: "CREATED" } as never)
 
       await provider.initiatePayment({
@@ -326,7 +395,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
 
     it("writes the vault token id into session data after a vaulted capture", async () => {
       const provider = createProvider()
-      jest.spyOn(clientOf(provider), "captureOrder").mockResolvedValue({
+      jest.spyOn(await clientOf(provider), "captureOrder").mockResolvedValue({
         id: "ORDER-1",
         status: "COMPLETED",
         purchaseUnits: [
@@ -367,7 +436,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
     it("skips order creation at initiation for off-session data", async () => {
       const provider = createProvider()
       const createSpy = jest
-        .spyOn(clientOf(provider), "createOrder")
+        .spyOn(await clientOf(provider), "createOrder")
         .mockResolvedValue({ id: "SHOULD-NOT-EXIST" } as never)
 
       const result = await provider.initiatePayment({
@@ -387,10 +456,10 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
     it("mints the order against the vault token and captures via capturePayment", async () => {
       const provider = createProvider()
       const createSpy = jest
-        .spyOn(clientOf(provider), "createOrder")
+        .spyOn(await clientOf(provider), "createOrder")
         .mockResolvedValue({ id: "ORDER-V", status: "CREATED" } as never)
       const captureSpy = jest
-        .spyOn(clientOf(provider), "captureOrder")
+        .spyOn(await clientOf(provider), "captureOrder")
         .mockResolvedValue({
           id: "ORDER-V",
           status: "COMPLETED",
@@ -437,7 +506,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
         }),
       })
       jest
-        .spyOn(clientOf(provider), "captureOrder")
+        .spyOn(await clientOf(provider), "captureOrder")
         .mockRejectedValue(decline as never)
 
       await expect(
@@ -465,7 +534,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
     it("exposes the PayPal approval link as redirect_url", async () => {
       const provider = createProvider()
       jest
-        .spyOn(clientOf(provider), "createOrder")
+        .spyOn(await clientOf(provider), "createOrder")
         .mockResolvedValue({
           id: "PAYPAL-1",
           status: "CREATED",
@@ -509,7 +578,7 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
     it("lists vaulted wallets as payment methods for the account holder", async () => {
       const provider = createProvider()
       const listSpy = jest
-        .spyOn(clientOf(provider), "listVaultedPaymentMethods")
+        .spyOn(await clientOf(provider), "listVaultedPaymentMethods")
         .mockResolvedValue([
           {
             id: "vault-token-1",
@@ -535,13 +604,129 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
     it("returns no methods without an account holder", async () => {
       const provider = createProvider()
       const listSpy = jest
-        .spyOn(clientOf(provider), "listVaultedPaymentMethods")
+        .spyOn(await clientOf(provider), "listVaultedPaymentMethods")
         .mockResolvedValue([] as never)
 
       const methods = await provider.listPaymentMethods({ context: {} })
 
       expect(methods).toEqual([])
       expect(listSpy).not.toHaveBeenCalled()
+    })
+  })
+})
+
+describe("PaypalModuleService (resolved configuration)", () => {
+  /**
+   * A container whose paypalSubscription module resolves through the real
+   * resolver contract: the provider must read credentials, environment,
+   * webhook ids and engine options from it, not from the bootstrap options.
+   */
+  function createProviderWithResolver() {
+    let version = 1
+    let resolvedConfig: Record<string, unknown> = {
+      clientId: "db-client",
+      clientSecret: "db-secret",
+      isSandbox: true,
+      webhookId: "webhook-primary",
+      subscriptionWebhookId: "webhook-subscription",
+      includeShippingData: false,
+      includeCustomerData: false,
+      autoBillOutstanding: true,
+      paymentFailureThreshold: 3,
+    }
+
+    const resolver = {
+      getResolvedPaypalConfig: jest.fn(async () => ({
+        config: resolvedConfig,
+        version,
+        sources: {},
+        meta: {},
+      })),
+    }
+
+    const container = {
+      logger: loggerStub,
+      paymentModuleService: {},
+      hasRegistration: (key: string) => key === "paypalSubscription",
+      resolve: (key: string) =>
+        key === "paypalSubscription" ? resolver : undefined,
+    }
+
+    const provider = new PaypalModuleService(container as never, {
+      clientId: "bootstrap-client",
+      clientSecret: "bootstrap-secret",
+      isSandbox: false,
+      includeShippingData: false,
+      includeCustomerData: false,
+    } as never)
+
+    return {
+      provider,
+      bump: (patch: Record<string, unknown>) => {
+        version += 1
+        resolvedConfig = { ...resolvedConfig, ...patch }
+      },
+    }
+  }
+
+  it("builds the client from the resolved config and reuses it while the version is stable", async () => {
+    const h = createProviderWithResolver()
+
+    const client = await clientOf(h.provider)
+
+    // The bootstrap options said live; the resolved config wins.
+    expect(client.environment).toBe("sandbox")
+    expect(await clientOf(h.provider)).toBe(client)
+  })
+
+  it("rebuilds the client and the engine when the resolved config changes", async () => {
+    const h = createProviderWithResolver()
+
+    const client = await clientOf(h.provider)
+    const engine = await (h.provider as any).getSubscriptionEngine()
+
+    expect(await (h.provider as any).getSubscriptionEngine()).toBe(engine)
+
+    h.bump({
+      isSandbox: false,
+      autoBillOutstanding: false,
+      paymentFailureThreshold: 7,
+    })
+
+    const rebuiltClient = await clientOf(h.provider)
+    const rebuiltEngine = await (h.provider as any).getSubscriptionEngine()
+
+    expect(rebuiltClient).not.toBe(client)
+    expect(rebuiltClient.environment).toBe("live")
+    expect(rebuiltEngine).not.toBe(engine)
+    expect((rebuiltEngine as any).deps.options).toEqual({
+      autoBillOutstanding: false,
+      paymentFailureThreshold: 7,
+    })
+  })
+
+  it("verifies webhooks with the resolved subscription webhook id fallback", async () => {
+    const h = createProviderWithResolver()
+    const verifySpy = jest
+      .spyOn(await clientOf(h.provider), "verifyWebhook")
+      .mockRejectedValueOnce(new Error("primary id rejected"))
+      .mockResolvedValueOnce({ status: "SUCCESS", body: {} } as never)
+
+    const result = await h.provider.getWebhookActionAndData({
+      data: {
+        event_type: "PAYMENT.CAPTURE.COMPLETED",
+        resource: {
+          custom_id: "sess_1",
+          amount: { value: "10.50", currency_code: "USD" },
+        },
+      },
+      headers: {},
+    } as never)
+
+    expect(result).toMatchObject({ action: "captured" })
+    expect(verifySpy).toHaveBeenCalledTimes(2)
+    expect(verifySpy.mock.calls[1][0]).toMatchObject({
+      webhookId: "webhook-subscription",
     })
   })
 })

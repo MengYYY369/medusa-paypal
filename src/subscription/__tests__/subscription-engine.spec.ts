@@ -20,6 +20,7 @@ const loggerStub = { warn: jest.fn(), info: jest.fn(), error: jest.fn(), debug: 
 
 function makeClient(overrides: Record<string, unknown> = {}) {
   return {
+    environment: "sandbox",
     createBillingProduct: jest.fn().mockResolvedValue({ id: "prod_P1" }),
     createBillingPlan: jest.fn().mockResolvedValue({ id: "plan_P1" }),
     createSubscription: jest.fn().mockResolvedValue({

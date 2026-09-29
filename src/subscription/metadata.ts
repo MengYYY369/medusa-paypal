@@ -95,11 +95,15 @@ export function parseSubscriptionMetadata(
 
 /**
  * Stable hash over everything that forces a new immutable PayPal plan:
- * recurring amount, currency, frequency, trial periods and setup fee.
- * A price edit therefore mints a new plan version while leaving old
- * subscriptions on their existing plan.
+ * recurring amount, currency, frequency, trial periods, setup fee and the
+ * PayPal environment. A price edit mints a new plan version while leaving old
+ * subscriptions on their existing plan; the environment is part of the
+ * material because a plan minted in sandbox is not chargeable in live.
  */
-export function planConfigHash(config: PaypalSubscriptionConfig): string {
+export function planConfigHash(
+  config: PaypalSubscriptionConfig,
+  environment: "sandbox" | "live"
+): string {
   const material = JSON.stringify({
     amount: config.amount,
     currency_code: config.currency_code,
@@ -107,6 +111,7 @@ export function planConfigHash(config: PaypalSubscriptionConfig): string {
     interval_count: config.interval_count,
     trial_periods: config.trial_periods ?? null,
     setup_fee: config.setup_fee ?? null,
+    environment,
   });
 
   return createHash("sha256").update(material).digest("hex");

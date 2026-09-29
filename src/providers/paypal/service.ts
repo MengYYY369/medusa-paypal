@@ -40,6 +40,11 @@ import {
   SubscriptionEngineOptions,
 } from "../../subscription/engine";
 import { isSubscriptionEvent } from "../../subscription/engine";
+import {
+  assertPaypalConfigured,
+  mergePaypalConfigLayers,
+  PaypalResolvedConfig,
+} from "../../modules/paypal-subscription/lib/config-resolver";
 import { z } from "zod";
 
 export interface PaypalPaymentError {
@@ -95,14 +100,26 @@ function extractPaypalDecline(error: unknown): PaypalErrorDetail {
   return { issue: body?.name, description: body?.message };
 }
 
+/**
+ * A credential counts as provided only when it is a non-blank string. An
+ * empty or whitespace-only value is treated as missing, so a typo'd env var
+ * (`PAYPAL_CLIENT_ID=""`) cannot boot half-configured.
+ */
+function providesCredential(value: string | undefined): boolean {
+  return typeof value === "string" && value.trim() !== "";
+}
+
 const optionsSchema = z.object({
+  // Credentials are optional so a zero-config install can boot and be
+  // configured from the admin settings page afterwards. `validateOptions`
+  // still rejects an incomplete pair (exactly one set) at boot.
   clientId: z
     .string()
-    .min(1, "PayPal client ID is required")
+    .optional()
     .describe(
-      "PayPal client ID used for authentication. This field is required."
+      "PayPal client ID used for authentication. Optional: when omitted (together with clientSecret) the plugin starts unconfigured and the credentials can be set on the admin PayPal settings page."
     ),
-  clientSecret: z.string().min(1, "PayPal client secret is required"),
+  clientSecret: z.string().optional(),
   isSandbox: z.boolean().default(false),
   webhookId: z.string().optional(),
   /**
@@ -121,15 +138,17 @@ export type PaypalPluginOptionsType = z.infer<typeof optionsSchema>;
 export type PaypalPluginOptions = {
   /**
    * PayPal client ID used for authentication.
-   * This field is required.
+   * Optional: omit both credentials to boot unconfigured and set them on the
+   * admin PayPal settings page.
    */
-  clientId: string;
+  clientId?: string;
 
   /**
    * PayPal client secret used for authentication.
-   * This field is required.
+   * Optional: omit both credentials to boot unconfigured and set them on the
+   * admin PayPal settings page.
    */
-  clientSecret: string;
+  clientSecret?: string;
 
   /**
    * Whether to use PayPal’s sandbox environment for testing.
@@ -265,13 +284,15 @@ interface AuthorizePaymentInputData
 export default class PaypalModuleService extends AbstractPaymentProvider<PaypalPluginOptionsType> {
   static identifier = "paypal";
 
-  protected client: PaypalService;
+  /** Current PayPal client; rebuilt by `getClient` when the config changes. */
+  protected client?: PaypalService;
   protected logger: Logger;
   protected paymentModuleService: any;
-  protected subscriptionEngine?: SubscriptionEngine;
   protected containerRef: Record<string, unknown>;
   /** QUERY tool, reached through the awilix cradle proxy; may be absent. */
   protected query?: unknown;
+  private clientCache?: { key: string; client: PaypalService };
+  private subscriptionEngineCache?: { key: string; engine: SubscriptionEngine };
 
   constructor(
     container: InjectedDependencies,
@@ -283,43 +304,119 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
     this.paymentModuleService = container.paymentModuleService;
     this.containerRef = container as unknown as Record<string, unknown>;
     this.query = resolveQueryFromCradle(container);
-
-    this.client = new PaypalService(this.options);
   }
 
   /**
-   * Builds the subscription engine once, wiring whatever subscription
-   * collaborators the cradle carries. Returns undefined for installs without
-   * the `dependencies` opt-in - every subscription entry point surfaces a
-   * clear configuration error through the engine's `require` helper.
+   * Reads the configuration the provider must act on right now: through the
+   * subscription module's resolver when it is registered (DB overrides ->
+   * provider options -> plugin options), otherwise through a local merge of
+   * the bootstrap options so installs without the module dependency keep
+   * working exactly as before, with no DB read. The cache key combines the
+   * settings row version with the resolved values because installs without
+   * the module always report version 0.
    */
-  protected getSubscriptionEngine(): SubscriptionEngine | undefined {
-    if (this.subscriptionEngine) {
-      return this.subscriptionEngine;
+  private async resolveRuntimeConfig(): Promise<{
+    config: PaypalResolvedConfig;
+    key: string;
+  }> {
+    const subscriptionModule = resolveOptionalCradleDependency(
+      this.containerRef as any,
+      "paypalSubscription"
+    );
+
+    if (
+      subscriptionModule &&
+      typeof subscriptionModule.getResolvedPaypalConfig === "function"
+    ) {
+      const { config, version } =
+        await subscriptionModule.getResolvedPaypalConfig({
+          providerOptions: this.options,
+        });
+
+      return { config, key: `${version}:${JSON.stringify(config)}` };
     }
 
+    const { config } = mergePaypalConfigLayers({
+      providerOptions: this.options,
+    });
+
+    return { config, key: `0:${JSON.stringify(config)}` };
+  }
+
+  private async resolveClient(): Promise<{
+    client: PaypalService;
+    config: PaypalResolvedConfig;
+    key: string;
+  }> {
+    const resolved = await this.resolveRuntimeConfig();
+
+    assertPaypalConfigured(resolved.config);
+
+    if (this.clientCache?.key === resolved.key) {
+      return {
+        client: this.clientCache.client,
+        config: resolved.config,
+        key: resolved.key,
+      };
+    }
+
+    const client = new PaypalService(resolved.config);
+    this.clientCache = { key: resolved.key, client };
+    this.client = client;
+
+    return { client, config: resolved.config, key: resolved.key };
+  }
+
+  /**
+   * The single choke point every PayPal call goes through: resolves the
+   * current config, refuses to run unconfigured (an empty-credential client
+   * would surface as a confusing PayPal 401) and rebuilds the client whenever
+   * the resolved config changed, so admin edits apply without a restart.
+   */
+  protected async getClient(): Promise<PaypalService> {
+    return (await this.resolveClient()).client;
+  }
+
+  /**
+   * Builds the subscription engine against the current configuration, wiring
+   * whatever subscription collaborators the cradle carries. Returns undefined
+   * for installs without the `dependencies` opt-in - every subscription entry
+   * point surfaces a clear configuration error through the engine's `require`
+   * helper. The engine is rebuilt whenever the resolved config changes:
+   * autoBillOutstanding / paymentFailureThreshold are baked into its options
+   * at construction, so a stale engine would silently ignore admin edits.
+   */
+  protected async getSubscriptionEngine(): Promise<
+    SubscriptionEngine | undefined
+  > {
     const cradle = this.containerRef;
 
     if (!cradle) {
       return undefined;
     }
 
+    const { client, config, key } = await this.resolveClient();
+
+    if (this.subscriptionEngineCache?.key === key) {
+      return this.subscriptionEngineCache.engine;
+    }
+
     const modules: SubscriptionEngineModules = { query: this.query };
 
-    for (const key of SUBSCRIPTION_CRADLE_KEYS) {
-      modules[key as "order"] = resolveOptionalCradleDependency(
+    for (const moduleKey of SUBSCRIPTION_CRADLE_KEYS) {
+      modules[moduleKey as "order"] = resolveOptionalCradleDependency(
         cradle as any,
-        key
+        moduleKey
       );
     }
 
     const engineOptions: SubscriptionEngineOptions = {
-      autoBillOutstanding: this.options.autoBillOutstanding,
-      paymentFailureThreshold: this.options.paymentFailureThreshold,
+      autoBillOutstanding: config.autoBillOutstanding,
+      paymentFailureThreshold: config.paymentFailureThreshold,
     };
 
-    this.subscriptionEngine = new SubscriptionEngine({
-      client: this.client,
+    const engine = new SubscriptionEngine({
+      client,
       logger: this.logger,
       eventBus: modules["event_bus"],
       subscriptionModule: modules["paypalSubscription"],
@@ -329,7 +426,9 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       options: engineOptions,
     });
 
-    return this.subscriptionEngine;
+    this.subscriptionEngineCache = { key, engine };
+
+    return engine;
   }
 
   static validateOptions(options: PaypalPluginOptionsType): void {
@@ -339,6 +438,26 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       throw new MedusaError(
         MedusaError.Types.INVALID_DATA,
         `Invalid PayPal plugin options: ${result.error.message}`
+      );
+    }
+
+    const hasClientId = providesCredential(result.data.clientId);
+    const hasClientSecret = providesCredential(result.data.clientSecret);
+
+    if (!hasClientId && !hasClientSecret) {
+      // Zero-config install: the admin settings page can supply credentials
+      // later, so an absent pair must not block boot.
+      console.warn(
+        "PayPal plugin is running unconfigured: no clientId/clientSecret were provided. " +
+          "Set them on the admin PayPal settings page to enable PayPal payments."
+      );
+      return;
+    }
+
+    if (!hasClientId || !hasClientSecret) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `Invalid PayPal plugin options: ${hasClientId ? "clientSecret" : "clientId"} is missing while the other credential is set. Provide both credentials or neither.`
       );
     }
   }
@@ -394,7 +513,8 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
 
       const id = input.data.id as string;
 
-      const captured = await this.client.captureOrder(id);
+      const client = await this.getClient();
+      const captured = await client.captureOrder(id);
 
       return {
         data: {
@@ -450,7 +570,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
     // ACTIVE (with one PayPal re-query fallback), letting the standard cart
     // completion create the first order.
     if (sessionData.is_subscription || sessionData.paypal_subscription_id) {
-      const engine = this.getSubscriptionEngine();
+      const engine = await this.getSubscriptionEngine();
 
       if (!engine) {
         throw new MedusaError(
@@ -496,14 +616,16 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
         CaptureStatus.Completed;
 
       if (!isAuthorized) {
+      const client = await this.getClient();
+
       try {
-        paypalData = await this.client.captureOrder(orderId);
+        paypalData = await client.captureOrder(orderId);
       } catch (err) {
         const body = JSON.parse(err?.body || "{}");
 
         const captureData = body?.purchase_units?.[0]?.payments?.captures?.[0];
 
-        const newOrder = await this.client.createOrder({
+        const newOrder = await client.createOrder({
           amount: Number(amount),
           currency: currencyCode,
           fractionDigits: await getPaypalFractionDigits(
@@ -568,7 +690,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       if (status === CaptureStatus.Declined) {
         // PayPal's declined capture reports the amount it was asked for
         // ("10.50"), which is already the major-unit number createOrder takes.
-        const newOrder = await this.client.createOrder({
+        const newOrder = await client.createOrder({
           amount: Number(captureData?.amount?.value),
           currency: captureData?.amount?.currencyCode!,
           fractionDigits: await getPaypalFractionDigits(
@@ -673,7 +795,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       // subscription branch (PayPal Billing subscription instead of an
       // order). Without the module the metadata cannot be read and checkout
       // proceeds exactly as before - subscriptions require the opt-in.
-      const engine = this.getSubscriptionEngine();
+      const engine = await this.getSubscriptionEngine();
 
       if (engine) {
         const detection = await engine.detectSubscriptionSession(data?.items);
@@ -722,7 +844,8 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
         }
       }
 
-      const order = await this.client.createOrder({
+      const client = await this.getClient();
+      const order = await client.createOrder({
         amount: Number(amount),
         currency: currency_code,
         fractionDigits: await getPaypalFractionDigits(
@@ -783,7 +906,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
         subscriptionSessionData.is_subscription ||
         subscriptionSessionData.paypal_sale_id
       ) {
-        const engine = this.getSubscriptionEngine();
+        const engine = await this.getSubscriptionEngine();
 
         if (!engine) {
           throw new MedusaError(
@@ -822,7 +945,8 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
         );
       }
 
-      await this.client.refundPayment(captureIds);
+      const client = await this.getClient();
+      await client.refundPayment(captureIds);
 
       return {
         data: {
@@ -918,7 +1042,8 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       return [];
     }
 
-    const tokens = await this.client.listVaultedPaymentMethods(
+    const client = await this.getClient();
+    const tokens = await client.listVaultedPaymentMethods(
       String(externalId)
     );
 
@@ -940,24 +1065,27 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
    * Verifies a webhook signature against the primary webhook id, falling
    * back to the subscription webhook id when one is configured - events
    * delivered on the second webhook are signed with its id, so verification
-   * must try both to keep mixed topologies working.
+   * must try both to keep mixed topologies working. Both ids come from the
+   * resolved config so admin edits apply immediately.
    */
   private async verifyWebhookSignature(
     headers: Record<string, string>,
     body: object
   ): Promise<void> {
+    const { client, config } = await this.resolveClient();
+
     try {
-      await this.client.verifyWebhook({ headers, body });
+      await client.verifyWebhook({ headers, body });
       return;
     } catch (error) {
-      if (!this.options.subscriptionWebhookId) {
+      if (!config.subscriptionWebhookId) {
         throw error;
       }
 
-      await this.client.verifyWebhook({
+      await client.verifyWebhook({
         headers,
         body,
-        webhookId: this.options.subscriptionWebhookId,
+        webhookId: config.subscriptionWebhookId,
       });
     }
   }
@@ -999,7 +1127,8 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
         );
       }
 
-      const order = await this.client.retrieveOrder(order_id);
+      const client = await this.getClient();
+      const order = await client.retrieveOrder(order_id);
 
       if (!order || !order.status) {
         throw new MedusaError(
@@ -1028,7 +1157,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
 
       // Subscription sessions reference a billing agreement, not an order.
       if (sessionData.is_subscription || sessionData.paypal_subscription_id) {
-        const engine = this.getSubscriptionEngine();
+        const engine = await this.getSubscriptionEngine();
 
         if (!engine) {
           throw new MedusaError(
@@ -1039,12 +1168,14 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
 
         const subscriptionId =
           (sessionData.paypal_subscription_id as string) ?? id;
-        const subscription = await this.client.getSubscription(subscriptionId);
+        const client = await this.getClient();
+        const subscription = await client.getSubscription(subscriptionId);
 
         return { data: { response: subscription } };
       }
 
-      const res = await this.client.retrieveOrder(id);
+      const client = await this.getClient();
+      const res = await client.retrieveOrder(id);
       return {
         data: { response: res },
       };
@@ -1079,7 +1210,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
     // a merchant routes everything to one): handled by the engine, which
     // returns not_supported for everything except the first-period sale
     // that must flow through the standard captured mechanism.
-    const engine = this.getSubscriptionEngine();
+    const engine = await this.getSubscriptionEngine();
 
     if (engine && isSubscriptionEvent(data.event_type)) {
       const handled = await engine.handleWebhookEvent(
@@ -1150,7 +1281,8 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
 
     let order: Order;
     try {
-      order = await this.client.createOrder({
+      const client = await this.getClient();
+      order = await client.createOrder({
         amount,
         currency: currencyCode,
         fractionDigits: await getPaypalFractionDigits(

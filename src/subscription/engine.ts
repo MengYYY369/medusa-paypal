@@ -348,7 +348,7 @@ export class SubscriptionEngine {
       currency_code: currencyCode,
     };
 
-    const hash = planConfigHash(fullConfig);
+    const hash = planConfigHash(fullConfig, client.environment);
 
     const existing = await subscriptionModule.listPaypalPlans({
       variant_id: variant.id,

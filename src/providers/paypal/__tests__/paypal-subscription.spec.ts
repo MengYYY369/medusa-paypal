@@ -67,7 +67,10 @@ function createProvider({
     productModule,
     orderModule,
     paymentModule,
-    clientOf: () => (provider as unknown as { client: PaypalService }).client,
+    clientOf: () =>
+      (
+        provider as unknown as { getClient(): Promise<PaypalService> }
+      ).getClient(),
   }
 }
 
@@ -76,13 +79,13 @@ describe("PaypalModuleService (subscription branches)", () => {
     it("creates a PayPal subscription session when items carry subscription metadata", async () => {
       const h = createProvider()
       jest
-        .spyOn(h.clientOf(), "createBillingProduct")
+        .spyOn(await h.clientOf(), "createBillingProduct")
         .mockResolvedValue({ id: "prod_P1" } as never)
       jest
-        .spyOn(h.clientOf(), "createBillingPlan")
+        .spyOn(await h.clientOf(), "createBillingPlan")
         .mockResolvedValue({ id: "plan_P1" } as never)
       const createSpy = jest
-        .spyOn(h.clientOf(), "createSubscription")
+        .spyOn(await h.clientOf(), "createSubscription")
         .mockResolvedValue({
           id: "I-NEW",
           status: "APPROVAL_PENDING",
@@ -101,7 +104,7 @@ describe("PaypalModuleService (subscription branches)", () => {
         },
       } as never)
 
-      const createOrderSpy = jest.spyOn(h.clientOf(), "createOrder")
+      const createOrderSpy = jest.spyOn(await h.clientOf(), "createOrder")
 
       expect(createSpy).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -123,10 +126,10 @@ describe("PaypalModuleService (subscription branches)", () => {
         variants: [makeVariant({ metadata: {} })],
       })
       const subscriptionSpy = jest
-        .spyOn(h.clientOf(), "createSubscription")
+        .spyOn(await h.clientOf(), "createSubscription")
         .mockResolvedValue({ id: "SHOULD-NOT-EXIST" } as never)
       const createOrderSpy = jest
-        .spyOn(h.clientOf(), "createOrder")
+        .spyOn(await h.clientOf(), "createOrder")
         .mockResolvedValue({ id: "PAYPAL-1" } as never)
 
       const result = await h.provider.initiatePayment({
@@ -169,7 +172,7 @@ describe("PaypalModuleService (subscription branches)", () => {
         makeRow({ status: "ACTIVE" })
       )
       const getSpy = jest
-        .spyOn(h.clientOf(), "getSubscription")
+        .spyOn(await h.clientOf(), "getSubscription")
         .mockResolvedValue({ id: "I-ABC123", status: "ACTIVE" } as never)
 
       const result = await h.provider.authorizePayment({
@@ -192,7 +195,7 @@ describe("PaypalModuleService (subscription branches)", () => {
         makeRow({ status: "APPROVAL_PENDING" })
       )
       jest
-        .spyOn(h.clientOf(), "getSubscription")
+        .spyOn(await h.clientOf(), "getSubscription")
         .mockResolvedValue({ id: "I-ABC123", status: "APPROVAL_PENDING" } as never)
 
       const result = await h.provider.authorizePayment({
@@ -210,8 +213,8 @@ describe("PaypalModuleService (subscription branches)", () => {
 
     it("book-keeps renewal sessions without PayPal calls", async () => {
       const h = createProvider()
-      const createOrderSpy = jest.spyOn(h.clientOf(), "createOrder")
-      const captureOrderSpy = jest.spyOn(h.clientOf(), "captureOrder")
+      const createOrderSpy = jest.spyOn(await h.clientOf(), "createOrder")
+      const captureOrderSpy = jest.spyOn(await h.clientOf(), "captureOrder")
 
       const result = await h.provider.authorizePayment({
         data: {
@@ -233,7 +236,7 @@ describe("PaypalModuleService (subscription branches)", () => {
   describe("capturePayment", () => {
     it("marks subscription sessions captured without a PayPal order capture", async () => {
       const h = createProvider()
-      const captureOrderSpy = jest.spyOn(h.clientOf(), "captureOrder")
+      const captureOrderSpy = jest.spyOn(await h.clientOf(), "captureOrder")
 
       const result = await h.provider.capturePayment({
         data: { is_subscription: true, paypal_subscription_id: "I-ABC123" },
@@ -249,14 +252,14 @@ describe("PaypalModuleService (subscription branches)", () => {
       const h = createProvider()
       const notFound = Object.assign(new Error("not found"), { paypalStatus: 404 })
       const refundSpy = jest
-        .spyOn(h.clientOf(), "refundSale")
+        .spyOn(await h.clientOf(), "refundSale")
         .mockResolvedValue({ id: "ref_1", status: "COMPLETED" } as never)
       jest
-        .spyOn(h.clientOf(), "getSale")
+        .spyOn(await h.clientOf(), "getSale")
         .mockResolvedValue({ id: "sale_2", status: "COMPLETED" } as never)
       // The current subscriptions platform records charges as v2 captures;
       // the v1 sale rail here is the fallback path being exercised.
-      jest.spyOn(h.clientOf(), "getCapture").mockRejectedValue(notFound)
+      jest.spyOn(await h.clientOf(), "getCapture").mockRejectedValue(notFound)
 
       const result = await h.provider.refundPayment({
         data: {
@@ -277,9 +280,9 @@ describe("PaypalModuleService (subscription branches)", () => {
   })
 
   describe("getWebhookActionAndData", () => {
-    function webhook(h: ReturnType<typeof createProvider>, body: Record<string, unknown>) {
+    async function webhook(h: ReturnType<typeof createProvider>, body: Record<string, unknown>) {
       jest
-        .spyOn(h.clientOf(), "verifyWebhook")
+        .spyOn(await h.clientOf(), "verifyWebhook")
         .mockResolvedValue({ status: "SUCCESS", body: {} } as never)
 
       return h.provider.getWebhookActionAndData({
@@ -346,7 +349,7 @@ describe("PaypalModuleService (subscription branches)", () => {
     it("still never acts when both webhook signatures fail to verify", async () => {
       const h = createProvider()
       jest
-        .spyOn(h.clientOf(), "verifyWebhook")
+        .spyOn(await h.clientOf(), "verifyWebhook")
         .mockRejectedValue(new Error("FAILURE") as never)
 
       const result = await h.provider.getWebhookActionAndData({
@@ -366,7 +369,7 @@ describe("PaypalModuleService (subscription branches)", () => {
     it("keeps regular checkout working and surfaces a configuration error for subscriptions", async () => {
       const h = createProvider({ withSubscriptionDeps: false })
       const createOrderSpy = jest
-        .spyOn(h.clientOf(), "createOrder")
+        .spyOn(await h.clientOf(), "createOrder")
         .mockResolvedValue({ id: "PAYPAL-1" } as never)
 
       const result = await h.provider.initiatePayment({

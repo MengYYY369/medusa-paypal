@@ -132,6 +132,11 @@ export interface PaypalTransactionResponse {
 }
 
 export class PaypalService {
+  /**
+   * Environment this client was built for. Public because plan hashing must
+   * differ per environment - a plan minted in sandbox is not reusable in live.
+   */
+  public readonly environment: "sandbox" | "live";
   private client: Client;
   private ordersController: OrdersController;
   private paymentsController: PaymentsController;
@@ -142,7 +147,11 @@ export class PaypalService {
   private webhookId: string | undefined;
   private includeShippingData: boolean;
   private includeCustomerData: boolean;
-  private baseUrl: string;
+  /**
+   * Environment-specific REST base. Public because the client-token route
+   * needs the same origin and must not re-derive the environment itself.
+   */
+  public readonly baseUrl: string;
 
   constructor({
     clientId,
@@ -156,10 +165,15 @@ export class PaypalService {
       ? Environment.Sandbox
       : Environment.Production;
 
+    // Optional credentials land here as "" when the plugin boots
+    // unconfigured; runtime calls are guarded by `assertPaypalConfigured`.
+    const effectiveClientId = clientId ?? "";
+    const effectiveClientSecret = clientSecret ?? "";
+
     this.client = new Client({
       clientCredentialsAuthCredentials: {
-        oAuthClientId: clientId,
-        oAuthClientSecret: clientSecret,
+        oAuthClientId: effectiveClientId,
+        oAuthClientSecret: effectiveClientSecret,
       },
       timeout: 0,
       environment,
@@ -178,9 +192,10 @@ export class PaypalService {
       ? "https://api-m.sandbox.paypal.com"
       : "https://api-m.paypal.com";
 
-    this.clientId = clientId;
-    this.clientSecret = clientSecret;
+    this.clientId = effectiveClientId;
+    this.clientSecret = effectiveClientSecret;
     this.webhookId = webhookId;
+    this.environment = isSandbox ? "sandbox" : "live";
 
     this.ordersController = new OrdersController(this.client);
     this.paymentsController = new PaymentsController(this.client);
