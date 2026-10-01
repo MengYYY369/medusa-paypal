@@ -17,8 +17,12 @@ import {
   OrderApplicationContextShippingPreference,
   OrderApplicationContextUserAction,
   FulfillmentType,
+  LinkDescription,
+  PaymentTokenStatus,
   StoreInVaultInstruction,
   VaultController,
+  VaultInstructionAction,
+  VaultTokenRequestType,
 } from "@paypal/paypal-server-sdk";
 import { CartAddressDTO, CartLineItemDTO } from "@medusajs/framework/types";
 import { parsePhoneNumberFromString } from "libphonenumber-js";
@@ -129,6 +133,145 @@ export interface PaypalTransactionResponse {
   status: string;
   amount?: { value: string; currency_code: string };
   time: string;
+}
+
+export interface PaypalVaultSetupTokenInput {
+  customer_id: string;
+  return_url: string;
+  cancel_url: string;
+}
+
+export interface PaypalVaultSetupTokenStart {
+  setup_token_id: string;
+  approve_url: string;
+}
+
+export interface PaypalVaultSetupTokenState {
+  setup_token_id: string;
+  status: string;
+  approve_url?: string;
+}
+
+export interface PaypalVaultPaymentToken {
+  vault_id: string;
+  customer_id?: string;
+}
+
+/** The parts of a PayPal REST error body that are safe to surface. */
+type PaypalErrorBody = {
+  name?: string;
+  details?: { issue?: string }[];
+};
+
+/**
+ * Pulls the HTTP status and the PayPal issue/name code out of an SDK error.
+ * Mirrors extractPaypalDecline in service.ts (`error.result ?? error.body`,
+ * string bodies parsed as JSON) but deliberately drops the
+ * `description`/`message`: PayPal echoes ids (setup token, vault id) into
+ * those, and this text reaches logs and API responses.
+ */
+function extractPaypalErrorCode(error: unknown): {
+  status?: number;
+  code?: string;
+} {
+  if (error === null || typeof error !== "object") {
+    return {};
+  }
+
+  const candidate = error as {
+    statusCode?: unknown;
+    body?: unknown;
+    result?: unknown;
+  };
+  const raw = candidate.result ?? candidate.body;
+
+  let body: PaypalErrorBody | undefined;
+
+  if (typeof raw === "string") {
+    try {
+      body = JSON.parse(raw) as PaypalErrorBody;
+    } catch {
+      body = undefined;
+    }
+  } else if (raw !== null && typeof raw === "object") {
+    body = raw as PaypalErrorBody;
+  }
+
+  return {
+    status:
+      typeof candidate.statusCode === "number" ? candidate.statusCode : undefined,
+    code: body?.details?.[0]?.issue ?? body?.name,
+  };
+}
+
+/**
+ * Translates a vault SDK/upstream failure into UNEXPECTED_STATE so the
+ * subscription engine's classifier renders a 500: it preserves only
+ * not_found / invalid_data / not_allowed / conflict / duplicate_error /
+ * payment_authorization_error, so an upstream vault fault must never be
+ * laundered into a fabricated 400 customer refusal.
+ */
+function toVaultFailure(operation: string, error: unknown): MedusaError {
+  const { status, code } = extractPaypalErrorCode(error);
+  const detail = [status !== undefined ? `HTTP ${status}` : undefined, code]
+    .filter((part): part is string => !!part)
+    .join(", ");
+
+  return new MedusaError(
+    MedusaError.Types.UNEXPECTED_STATE,
+    detail
+      ? `PayPal vault ${operation} failed (${detail})`
+      : `PayPal vault ${operation} failed`,
+  );
+}
+
+/** Runs one vault SDK call, converting any rejection into a MedusaError. */
+async function callVaultApi<T>(
+  operation: string,
+  call: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    throw toVaultFailure(operation, error);
+  }
+}
+
+/**
+ * Approval link of a setup token. The sandbox harness reads `approve` first
+ * and falls back to `payer-action`; both relations appear in live responses.
+ */
+function extractApproveUrl(
+  links: LinkDescription[] | undefined,
+): string | undefined {
+  const link =
+    links?.find((candidate) => candidate.rel === "approve") ??
+    links?.find((candidate) => candidate.rel === "payer-action");
+
+  return link?.href;
+}
+
+/**
+ * PayPal requires absolute http(s) return/cancel URLs on vault flows
+ * (RETURN_URL_REQUIRED / CANCEL_URL_REQUIRED otherwise). A bad value is a
+ * caller bug, so it is rejected here - before any network call - as
+ * INVALID_DATA and must not be reported as an upstream vault failure.
+ */
+function assertAbsoluteHttpUrl(field: string, value: string): void {
+  let parsed: URL | undefined;
+
+  try {
+    parsed = new URL(value);
+  } catch {
+    parsed = undefined;
+  }
+
+  if (!parsed || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      `Invalid ${field}: expected an absolute http(s) URL`,
+    );
+  }
 }
 
 export class PaypalService {
@@ -368,6 +511,111 @@ export class PaypalService {
     });
 
     return response.result.paymentTokens ?? [];
+  }
+
+  /**
+   * Creates a Vault v3 setup token for a customer's PayPal wallet. The
+   * caller's customer id is a merchant-side id and goes into the top-level
+   * `customer.merchantCustomerId` - a sibling of `paymentSource`, because the
+   * wallet request object has no customer member. Returns the setup token id
+   * plus the payer-approval link the storefront must send the buyer to.
+   * `permitMultiplePaymentTokens` stays at PayPal's default (false): one
+   * wallet maps to one merchant customer.
+   */
+  async createVaultSetupToken(
+    input: PaypalVaultSetupTokenInput,
+  ): Promise<PaypalVaultSetupTokenStart> {
+    assertAbsoluteHttpUrl("return_url", input.return_url);
+    assertAbsoluteHttpUrl("cancel_url", input.cancel_url);
+
+    const response = await callVaultApi("create setup token", () =>
+      this.vaultController.createSetupToken({
+        body: {
+          customer: { merchantCustomerId: input.customer_id },
+          paymentSource: {
+            paypal: {
+              usageType: PaypalPaymentTokenUsageType.Merchant,
+              experienceContext: {
+                returnUrl: input.return_url,
+                cancelUrl: input.cancel_url,
+                vaultInstruction: VaultInstructionAction.OnPayerApproval,
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    const setupTokenId = response.result.id;
+    const approveUrl = extractApproveUrl(response.result.links);
+
+    if (!setupTokenId || !approveUrl) {
+      throw new MedusaError(
+        MedusaError.Types.UNEXPECTED_STATE,
+        `PayPal vault setup token response is missing the ${
+          setupTokenId ? "payer approval link" : "setup token id"
+        }`,
+      );
+    }
+
+    return { setup_token_id: setupTokenId, approve_url: approveUrl };
+  }
+
+  /**
+   * Reads a setup token's state back from PayPal. The status is surfaced as a
+   * plain string: sandbox reports VAULTED (not APPROVED) once the payer has
+   * approved, so APPROVED / VAULTED / TOKENIZED are treated as exchangeable
+   * by the caller.
+   */
+  async getVaultSetupToken(id: string): Promise<PaypalVaultSetupTokenState> {
+    const response = await callVaultApi("get setup token", () =>
+      this.vaultController.getSetupToken(id),
+    );
+
+    const status: PaymentTokenStatus | undefined = response.result.status;
+    const approveUrl = extractApproveUrl(response.result.links);
+
+    return {
+      setup_token_id: response.result.id ?? id,
+      status: status ?? "",
+      ...(approveUrl && { approve_url: approveUrl }),
+    };
+  }
+
+  /**
+   * Exchanges an approved setup token for a permanent Vault v3 payment token.
+   * The returned id is the payment-method reference the subscription engine
+   * stores and later charges off-session.
+   */
+  async createVaultPaymentToken(
+    setupTokenId: string,
+  ): Promise<PaypalVaultPaymentToken> {
+    const response = await callVaultApi("create payment token", () =>
+      this.vaultController.createPaymentToken({
+        body: {
+          paymentSource: {
+            token: {
+              id: setupTokenId,
+              type: VaultTokenRequestType.SetupToken,
+            },
+          },
+        },
+      }),
+    );
+
+    const vaultId = response.result.id;
+
+    if (!vaultId) {
+      throw new MedusaError(
+        MedusaError.Types.UNEXPECTED_STATE,
+        "PayPal vault payment token response is missing the payment token id",
+      );
+    }
+
+    return {
+      vault_id: vaultId,
+      customer_id: response.result.customer?.merchantCustomerId,
+    };
   }
 
   async refundPayment(captureIds: string[]): Promise<Refund[]> {
