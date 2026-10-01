@@ -19,6 +19,7 @@ import {
   PaypalResolvedConfig,
 } from "./lib/config-resolver";
 import { PaypalService } from "../../providers/paypal/paypal-core/paypal-core";
+import * as vault from "../../vault";
 import {
   SubscriptionEngine,
   SubscriptionEngineModules,
@@ -517,5 +518,48 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
     const engine = await this.withModules(modules);
 
     return engine.reconcile();
+  }
+
+  // -- Vault binding (no-charge payment-method binding) ---------------------
+
+  /**
+   * Client for the vault-binding flow. Built from the module's own resolved
+   * configuration (db -> providerOptions -> pluginOptions) because the DB
+   * settings row is the authoritative layer in production: the host registers
+   * this plugin as a bare string, so module options never arrive and a client
+   * built from anything else would silently ignore an admin edit. Do not
+   * "simplify" this to module options, and do not resolve the payment module -
+   * this module declares no dependencies, so its local container cannot reach
+   * it. Overridable so unit tests can inject a mock client.
+   */
+  protected async getVaultClient(): Promise<PaypalService> {
+    const { config } = await this.getResolvedPaypalConfig();
+
+    try {
+      assertPaypalConfigured(config);
+    } catch (error) {
+      // assertPaypalConfigured throws INVALID_DATA for the settings page; for
+      // this capability an unconfigured plugin is a server fault. reorder
+      // preserves INVALID_DATA and would render it as a 400 customer refusal.
+      throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, errorMessage(error));
+    }
+
+    return new PaypalService(config);
+  }
+
+  async startVaultApproval(
+    input: vault.StartVaultApprovalInput
+  ): Promise<vault.StartVaultApprovalResult> {
+    const client = await this.getVaultClient();
+
+    return vault.startVaultApproval(client, input);
+  }
+
+  async completeVaultApproval(
+    input: vault.CompleteVaultApprovalInput
+  ): Promise<vault.CompleteVaultApprovalResult> {
+    const client = await this.getVaultClient();
+
+    return vault.completeVaultApproval(client, input);
   }
 }
