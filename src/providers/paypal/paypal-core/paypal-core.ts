@@ -322,8 +322,9 @@ export class PaypalService {
       environment,
       logging: {
         logLevel: LogLevel.Info,
+        // Request bodies carry vault ids and setup token ids; never log them.
         logRequest: {
-          logBody: true,
+          logBody: false,
         },
         logResponse: {
           logHeaders: true,
