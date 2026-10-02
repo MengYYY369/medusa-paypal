@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-10-03
+
+### Added
+
+- **Payment-method deletion.** The provider now implements the optional
+  `deletePaymentMethod` (payment provider interface, `@since 2.16.0`). It
+  resolves the account holder from the call context and requires the target id
+  to be one of that holder's own vaulted tokens before calling
+  `DELETE /v1/vault/payment-tokens/{id}` — an id outside the holder's vault is
+  refused (`NOT_FOUND`), so the method cannot be turned into a blind
+  delete-by-id primitive for another customer's wallet (IDOR). A `404` from
+  PayPal is treated as success, keeping a retried unbind idempotent. The
+  PayPal call's failures go through the existing vault sanitizer
+  (`toVaultFailure`), so neither a response nor a log line can echo the token
+  id.
+- **`@mengyyy369/medusa-paypal/binder` subpath.** `createPaypalBinder({
+  clientId, clientSecret, isSandbox })` returns a `PaymentMethodBinder`
+  (`{ start, complete }`) that wraps the no-charge vault-approval flow. It is
+  the PayPal implementation the `medusa-payment-methods` plugin consumes
+  through its `binders` map; credentials are passed explicitly, so the binder
+  reads no environment variables and holds no container reference.
+
+### Tests
+
+- Client-level deletion tests over a mocked vault controller: success, `404`
+  idempotency, `5xx` and `401` (both sanitized to `UNEXPECTED_STATE` with no
+  token id in the message), plus provider-level ownership refusal, missing
+  account holder and missing id.
+- Binder `start` / `complete` unit tests over the vault prototype: approval
+  URL + state mapping, exchange to the payment method id, refusal of an
+  unapproved setup token and pass-through of upstream failures.
+
 ## [0.9.2] - 2026-10-02
 
 ### Fixed
