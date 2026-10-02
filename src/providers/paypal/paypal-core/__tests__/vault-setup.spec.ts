@@ -400,3 +400,38 @@ describe("PaypalService vault upstream failures", () => {
     expect(error.message).not.toContain("SETUP-SECRET-123");
   });
 });
+
+describe("PaypalService SDK logging", () => {
+  /**
+   * The red line is "never log a setup token, a vault id or an approval URL".
+   * Supplying a `logging` object makes the SDK build its ConsoleLogger, which
+   * prints the request URL line - and `getSetupToken` issues
+   * `GET /v3/vault/setup-tokens/{id}`, so the id lands on stdout on every
+   * approval check. A mocked-controller test cannot see that, so this pins
+   * the absence of a `logging` block: a future re-add would otherwise go
+   * unnoticed.
+   */
+  it("leaves the SDK client on the SDK's no-op logger with body logging off", () => {
+    const client = new PaypalService({
+      clientId: "test-client-id",
+      clientSecret: "test-client-secret",
+      isSandbox: true,
+      includeShippingData: false,
+      includeCustomerData: false,
+    });
+
+    const { _loggingOp } = (
+      client as unknown as {
+        client: {
+          _loggingOp: {
+            logger: { constructor: { name: string } };
+            logRequest: { logBody: boolean };
+          };
+        };
+      }
+    ).client;
+
+    expect(_loggingOp.logger.constructor.name).toBe("NullLogger");
+    expect(_loggingOp.logRequest.logBody).toBe(false);
+  });
+});

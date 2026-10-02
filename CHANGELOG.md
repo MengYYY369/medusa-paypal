@@ -40,10 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **PayPal request bodies are no longer logged.** The SDK client logged every
-  request body at `LogLevel.Info` (session ids, amounts, vault ids, setup
-  token ids). `logRequest.logBody` is now `false`, so a vault id or setup
-  token id can never reach the logs; response headers are still logged.
+- **PayPal SDK client logging is left unset, so the SDK logs nothing.** The
+  plugin no longer passes a `logging` config to the SDK client, so the SDK
+  falls back to its `NullLogger` and emits nothing. Supplying a `logging`
+  object made the SDK build its `ConsoleLogger`, which prints the request URL
+  line - and the setup token lookup is `GET /v3/vault/setup-tokens/{id}`, so a
+  setup token id reached stdout on every approval check. Request bodies are
+  covered by the same change: they carry vault ids and setup token ids. This
+  covers the plugin's own PayPal SDK client only; logging by the host
+  framework is out of scope.
 
 ### Notes
 

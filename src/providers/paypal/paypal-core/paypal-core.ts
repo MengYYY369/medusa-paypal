@@ -2,7 +2,6 @@ import {
   CheckoutPaymentIntent,
   Client,
   Environment,
-  LogLevel,
   OAuthAuthorizationController,
   Order,
   OrderAuthorizeResponse,
@@ -320,16 +319,12 @@ export class PaypalService {
       },
       timeout: 0,
       environment,
-      logging: {
-        logLevel: LogLevel.Info,
-        // Request bodies carry vault ids and setup token ids; never log them.
-        logRequest: {
-          logBody: false,
-        },
-        logResponse: {
-          logHeaders: true,
-        },
-      },
+      // No `logging` key on purpose: supplying one makes the SDK build its
+      // ConsoleLogger, which prints the request URL line - and the setup
+      // token lookup is `GET /v3/vault/setup-tokens/{id}`, so the id would
+      // reach stdout on every approval check. Request bodies carry vault ids
+      // and setup token ids too. Left unset, the SDK merges its own defaults,
+      // whose logger is a NullLogger that emits nothing.
     });
 
     this.baseUrl = isSandbox
