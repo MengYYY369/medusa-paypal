@@ -218,7 +218,7 @@ const { setup_token_id, approve_url } = await svc.startVaultApproval({
 })
 
 // 2. After the buyer returns, exchange the approved token.
-const { status, vault_id, customer_id } = await svc.completeVaultApproval({
+const { status, vault_id } = await svc.completeVaultApproval({
   setup_token_id,
 })
 // While the payer has not approved: only `status` is present, no `vault_id`.

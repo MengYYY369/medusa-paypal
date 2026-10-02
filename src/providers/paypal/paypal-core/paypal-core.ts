@@ -165,7 +165,6 @@ export interface PaypalVaultSetupTokenState {
 
 export interface PaypalVaultPaymentToken {
   vault_id: string;
-  customer_id?: string;
 }
 
 /** The parts of a PayPal REST error body that are safe to surface. */
@@ -660,10 +659,7 @@ export class PaypalService {
       );
     }
 
-    return {
-      vault_id: vaultId,
-      customer_id: response.result.customer?.merchantCustomerId,
-    };
+    return { vault_id: vaultId };
   }
 
   async refundPayment(captureIds: string[]): Promise<Refund[]> {

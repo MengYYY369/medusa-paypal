@@ -46,7 +46,6 @@ export type CompleteVaultApprovalInput = {
 export type CompleteVaultApprovalResult = {
   status: string;
   vault_id?: string;
-  customer_id?: string;
 };
 
 /** Setup-token statuses that mean the payer approved and the token can be exchanged. */
@@ -77,5 +76,5 @@ export async function completeVaultApproval(
 
   const token = await client.createVaultPaymentToken(input.setup_token_id);
 
-  return { status: state.status, vault_id: token.vault_id, customer_id: token.customer_id };
+  return { status: state.status, vault_id: token.vault_id };
 }

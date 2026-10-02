@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`completeVaultApproval()` no longer returns `customer_id`.** The field had
+  been always `undefined` since 0.9.0 (the exchange response carries only the
+  derived `customer.id`, because the merchant id is not sent); it is now
+  removed from the result type and the returned object. Consumers read
+  `status` and `vault_id`.
+
 ## [0.9.0] - 2026-10-02
 
 ### Fixed

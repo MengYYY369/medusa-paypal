@@ -443,10 +443,10 @@ describe("PaypalService.listVaultedPaymentMethods", () => {
 });
 
 describe("PaypalService.createVaultPaymentToken", () => {
-  it("exchanges the setup token and returns the vault id with the merchant customer id", async () => {
+  it("exchanges the setup token and returns the vault id", async () => {
     const mock = makeMockVaultController();
     mock.createPaymentToken.mockResolvedValue({
-      result: { id: "VAULT-1", customer: { merchantCustomerId: "cus_123" } },
+      result: { id: "VAULT-1" },
     });
     const client = makeClient(mock);
 
@@ -457,7 +457,7 @@ describe("PaypalService.createVaultPaymentToken", () => {
         paymentSource: { token: { id: "SETUP-1", type: "SETUP_TOKEN" } },
       },
     });
-    expect(token).toEqual({ vault_id: "VAULT-1", customer_id: "cus_123" });
+    expect(token).toEqual({ vault_id: "VAULT-1" });
   });
 
   it("rejects a response without a payment token id as UNEXPECTED_STATE", async () => {

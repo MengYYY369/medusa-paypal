@@ -122,7 +122,6 @@ describe("PaypalSubscriptionModuleService vault binding", () => {
     stub.getVaultSetupToken.mockResolvedValue({ setup_token_id: "st_1", status: "VAULTED" });
     stub.createVaultPaymentToken.mockResolvedValue({
       vault_id: "vault_1",
-      customer_id: "cus_1",
     });
     overrideVaultClient(service, client);
 
@@ -131,7 +130,6 @@ describe("PaypalSubscriptionModuleService vault binding", () => {
     ).resolves.toEqual({
       status: "VAULTED",
       vault_id: "vault_1",
-      customer_id: "cus_1",
     });
     expect(stub.createVaultPaymentToken).toHaveBeenCalledWith("st_1");
   });

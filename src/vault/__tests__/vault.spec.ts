@@ -67,7 +67,6 @@ describe("completeVaultApproval", () => {
       stub.getVaultSetupToken.mockResolvedValue({ setup_token_id: "st_1", status });
       stub.createVaultPaymentToken.mockResolvedValue({
         vault_id: "vault_1",
-        customer_id: "cus_1",
       });
 
       await expect(
@@ -75,7 +74,6 @@ describe("completeVaultApproval", () => {
       ).resolves.toEqual({
         status,
         vault_id: "vault_1",
-        customer_id: "cus_1",
       });
       expect(stub.createVaultPaymentToken).toHaveBeenCalledTimes(1);
       expect(stub.createVaultPaymentToken).toHaveBeenCalledWith("st_1");
