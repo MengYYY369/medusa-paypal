@@ -998,9 +998,11 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
 
   /**
    * Registers a Medusa account holder for a customer. PayPal has no
-   * server-side holder entity: the Medusa customer id doubles as the
-   * merchant-side customer id used to associate wallets at save time
-   * (merchant_customer_id) and to list them afterwards.
+   * server-side holder entity: the Medusa customer id is the merchant-side
+   * customer id the provider derives a 22-character id from, and only that
+   * derived id is sent to PayPal as `customer.id` - the id PayPal's
+   * payment-token list endpoint resolves by. The merchant id itself never
+   * reaches PayPal.
    */
   async createAccountHolder(
     input: ProviderAccountHolderInput
@@ -1026,8 +1028,9 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
 
   /**
    * Lists the vaulted PayPal wallets saved for an account holder. The
-   * holder's external id is the merchant-side customer id the wallets were
-   * associated with when they were saved.
+   * holder's external id is the merchant-side customer id the derived PayPal
+   * customer id is computed from; the wallets themselves are associated with
+   * that derived id.
    */
   async listPaymentMethods(input: {
     context?: {

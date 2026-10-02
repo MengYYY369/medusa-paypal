@@ -1,5 +1,6 @@
 import { MedusaError } from "@medusajs/framework/utils";
-import { PaypalService } from "../paypal-core";
+import { OrdersController } from "@paypal/paypal-server-sdk";
+import { derivePaypalCustomerId, PaypalService } from "../paypal-core";
 
 /**
  * Vault v3 setup-token / payment-token contract locks over a mocked
@@ -18,7 +19,7 @@ const PAYER_ACTION_URL =
   "https://www.sandbox.paypal.com/payer-action?token=SETUP-1";
 
 type VaultSetupTokenBody = {
-  customer?: { merchantCustomerId?: string };
+  customer?: { id?: string; merchantCustomerId?: string };
   paymentSource: {
     paypal?: {
       usageType?: string;
@@ -45,6 +46,10 @@ type MockVaultController = {
     Promise<unknown>,
     [{ body: VaultPaymentTokenBody }]
   >;
+  listCustomerPaymentTokens: jest.Mock<
+    Promise<unknown>,
+    [{ customerId: string }]
+  >;
 };
 
 function makeMockVaultController(): MockVaultController {
@@ -52,6 +57,7 @@ function makeMockVaultController(): MockVaultController {
     createSetupToken: jest.fn(),
     getSetupToken: jest.fn(),
     createPaymentToken: jest.fn(),
+    listCustomerPaymentTokens: jest.fn(),
   };
 }
 
@@ -113,8 +119,42 @@ const upstreamFailure = {
   },
 };
 
+describe("derivePaypalCustomerId", () => {
+  /**
+   * PayPal's `customer.id` and the list parameter are both capped at 22
+   * characters over `[0-9a-zA-Z_-]`; Medusa customer ids are 30, so a value
+   * that breaks either limit would turn the listing into a 400.
+   */
+  it("produces exactly 22 characters of PayPal's allowed alphabet", () => {
+    const derived = derivePaypalCustomerId("cus_01M2RJY2ESYR7X87A000SV0TCX");
+
+    expect(derived).toMatch(/^[0-9a-zA-Z_-]{22}$/);
+  });
+
+  it("matches the sandbox-verified value for a known Medusa customer id", () => {
+    // Golden value from the 0.9.0 sandbox verification. The derived id is a
+    // permanent external key, so a change to the digest or to input handling
+    // must fail loudly here rather than silently orphan already-minted tokens.
+    expect(derivePaypalCustomerId("cus_01M2RJY2ESYR7X87A000SV0TCX")).toBe(
+      "RiY_lqIlWvqOZW-UK-x8Xm",
+    );
+  });
+
+  it("is deterministic for the same merchant customer id", () => {
+    expect(derivePaypalCustomerId("cus_123")).toBe(
+      derivePaypalCustomerId("cus_123"),
+    );
+  });
+
+  it("maps distinct merchant customer ids to distinct derived ids", () => {
+    expect(derivePaypalCustomerId("cus_123")).not.toBe(
+      derivePaypalCustomerId("cus_124"),
+    );
+  });
+});
+
 describe("PaypalService.createVaultSetupToken", () => {
-  it("sends the wallet vault body with a top-level merchant customer id", async () => {
+  it("sends the wallet vault body with the derived customer id only", async () => {
     const mock = makeMockVaultController();
     mock.createSetupToken.mockResolvedValue({
       result: {
@@ -135,7 +175,11 @@ describe("PaypalService.createVaultSetupToken", () => {
 
     const [{ body }] = mock.createSetupToken.mock.calls[0];
 
-    expect(body.customer).toEqual({ merchantCustomerId: "cus_123" });
+    expect(body.customer).toEqual({ id: derivePaypalCustomerId("cus_123") });
+    // The merchant id is never sent: PayPal freezes a customer record's
+    // `customer.id` at the first `merchant_customer_id` association and would
+    // ignore the derived id afterwards.
+    expect(body.customer).not.toHaveProperty("merchantCustomerId");
     expect(body.paymentSource.paypal?.usageType).toBe("MERCHANT");
     expect(body.paymentSource.paypal?.experienceContext).toEqual({
       returnUrl: RETURN_URL,
@@ -144,10 +188,11 @@ describe("PaypalService.createVaultSetupToken", () => {
     });
     // The wallet request object has no customer member: the id is top-level.
     expect(body.paymentSource.paypal).not.toHaveProperty("customer");
-    // One wallet maps to one merchant customer (PayPal default, not sent).
+    // Per-customer tokens: without the flag PayPal reuses the payer's
+    // existing token, which carries a previously vaulted customer's id.
     expect(
       body.paymentSource.paypal?.permitMultiplePaymentTokens,
-    ).toBeUndefined();
+    ).toBe(true);
 
     expect(start).toEqual({
       setup_token_id: "SETUP-1",
@@ -299,15 +344,101 @@ describe("PaypalService.getVaultSetupToken", () => {
     });
   });
 
-  it("falls back to the requested id and an empty status", async () => {
+  it("rejects a response without a status as UNEXPECTED_STATE", async () => {
     const mock = makeMockVaultController();
     mock.getSetupToken.mockResolvedValue({ result: {} });
     const client = makeClient(mock);
 
-    const state = await client.getVaultSetupToken("SETUP-9");
+    const error = await captureRejection(client.getVaultSetupToken("SETUP-9"));
 
-    expect(state).toEqual({ setup_token_id: "SETUP-9", status: "" });
-    expect(state.approve_url).toBeUndefined();
+    expect(error.type).toBe(MedusaError.Types.UNEXPECTED_STATE);
+    expect(error.message).toContain("missing the status");
+    // The setup token id is a secret: it must not reach the message.
+    expect(error.message).not.toContain("SETUP-9");
+    expectNotClassifierPreserved(error.type);
+  });
+});
+
+describe("PaypalService.listVaultedPaymentMethods", () => {
+  const notFound = {
+    statusCode: 404,
+    result: {
+      name: "RESOURCE_NOT_FOUND",
+      details: [{ issue: "CUSTOMER_ID_NOT_FOUND" }],
+    },
+  };
+
+  it("queries PayPal with the derived 22-character customer id", async () => {
+    const mock = makeMockVaultController();
+    mock.listCustomerPaymentTokens.mockResolvedValue({
+      result: { paymentTokens: [{ id: "VAULT-1" }] },
+    });
+    const client = makeClient(mock);
+
+    const tokens = await client.listVaultedPaymentMethods("cus_123");
+
+    expect(mock.listCustomerPaymentTokens).toHaveBeenCalledWith({
+      customerId: derivePaypalCustomerId("cus_123"),
+    });
+    expect(tokens).toEqual([{ id: "VAULT-1" }]);
+  });
+
+  it("returns an empty list when the customer has no vaulted tokens", async () => {
+    const mock = makeMockVaultController();
+    mock.listCustomerPaymentTokens.mockRejectedValue(notFound);
+    const client = makeClient(mock);
+
+    await expect(client.listVaultedPaymentMethods("cus_123")).resolves.toEqual(
+      [],
+    );
+  });
+
+  it("propagates a 404 that is not CUSTOMER_ID_NOT_FOUND", async () => {
+    const mock = makeMockVaultController();
+    const failure = {
+      statusCode: 404,
+      result: {
+        name: "RESOURCE_NOT_FOUND",
+        details: [{ issue: "INVALID_RESOURCE_ID" }],
+      },
+    };
+    mock.listCustomerPaymentTokens.mockRejectedValue(failure);
+    const client = makeClient(mock);
+
+    await expect(client.listVaultedPaymentMethods("cus_123")).rejects.toBe(
+      failure,
+    );
+  });
+
+  it("propagates a 500", async () => {
+    const mock = makeMockVaultController();
+    const failure = {
+      statusCode: 500,
+      result: { name: "INTERNAL_SERVER_ERROR" },
+    };
+    mock.listCustomerPaymentTokens.mockRejectedValue(failure);
+    const client = makeClient(mock);
+
+    await expect(client.listVaultedPaymentMethods("cus_123")).rejects.toBe(
+      failure,
+    );
+  });
+
+  it("propagates a 400 INVALID_STRING_LENGTH instead of mapping it to an empty list", async () => {
+    const mock = makeMockVaultController();
+    const failure = {
+      statusCode: 400,
+      result: {
+        name: "INVALID_REQUEST",
+        details: [{ issue: "INVALID_STRING_LENGTH" }],
+      },
+    };
+    mock.listCustomerPaymentTokens.mockRejectedValue(failure);
+    const client = makeClient(mock);
+
+    await expect(client.listVaultedPaymentMethods("cus_123")).rejects.toBe(
+      failure,
+    );
   });
 });
 
@@ -433,5 +564,67 @@ describe("PaypalService SDK logging", () => {
 
     expect(_loggingOp.logger.constructor.name).toBe("NullLogger");
     expect(_loggingOp.logRequest.logBody).toBe(false);
+  });
+});
+
+describe("PaypalService.createOrder vault branches", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  /**
+   * `createOrder` builds its own OrdersController from the SDK client, so the
+   * order body is captured at the prototype method.
+   */
+  function spyOnCreateOrder() {
+    const spy = jest.spyOn(OrdersController.prototype, "createOrder");
+
+    spy.mockResolvedValue({ result: { id: "ORDER-1" } } as never);
+
+    return spy;
+  }
+
+  it("sends the derived customer id and the permit-multiple flag when vaulting at checkout", async () => {
+    const client = makeClient(makeMockVaultController());
+    const spy = spyOnCreateOrder();
+
+    await client.createOrder({
+      amount: 10,
+      currency: "USD",
+      fractionDigits: 2,
+      vaultCustomerId: "cus_123",
+      return_url: RETURN_URL,
+      cancel_url: CANCEL_URL,
+    });
+
+    const [{ body }] = spy.mock.calls[0];
+    const attributes = body.paymentSource?.paypal?.attributes;
+
+    expect(attributes?.vault?.permitMultiplePaymentTokens).toBe(true);
+    // Orders v2 rejects `customer.id` and `customer.merchant_customer_id`
+    // together (422 INCOMPATIBLE_PARAMETER_VALUE), so the checkout branch
+    // sends only the derived id.
+    expect(attributes?.customer).toEqual({
+      id: derivePaypalCustomerId("cus_123"),
+    });
+    expect(attributes?.customer).not.toHaveProperty("merchantCustomerId");
+  });
+
+  it("charges a vault id off-session without a customer object", async () => {
+    const client = makeClient(makeMockVaultController());
+    const spy = spyOnCreateOrder();
+
+    await client.createOrder({
+      amount: 10,
+      currency: "USD",
+      fractionDigits: 2,
+      vaultId: "VAULT-1",
+      sessionId: "sess_1",
+    });
+
+    const [{ body }] = spy.mock.calls[0];
+
+    expect(body.paymentSource?.paypal?.vaultId).toBe("VAULT-1");
+    expect(body.paymentSource?.paypal?.attributes).toBeUndefined();
   });
 });

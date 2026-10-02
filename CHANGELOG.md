@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-10-02
+
+### Fixed
+
+- **Saved PayPal wallets are listable again.** PayPal's payment-token list
+  endpoint resolves by the merchant-supplied `customer.id` (max 22 characters,
+  `[0-9a-zA-Z_-]`), not by `customer.merchantCustomerId`. The plugin passed
+  only the merchant id at vault time and then listed with the 30-character
+  Medusa customer id, which PayPal rejects with `400 INVALID_STRING_LENGTH`.
+  Both vault flows now send a deterministic 22-character id derived from the
+  merchant id as `customer.id` and never send `customer.merchantCustomerId`,
+  and the listing queries by the derived id. Same value on every instance, no
+  storage and no migration. The merchant id cannot be sent: PayPal freezes a
+  customer record's `customer.id` at the first `merchant_customer_id`
+  association and ignores a later derived id, and Orders v2 rejects the two
+  fields together with `422 INCOMPATIBLE_PARAMETER_VALUE`.
+- **`permitMultiplePaymentTokens: true` on both vault paths.** The
+  vault-approval setup token and the checkout `store_in_vault: ON_SUCCESS`
+  branch now mint a token per customer. Without the flag PayPal reuses the
+  payer's existing token, which carries a previously vaulted customer's ids,
+  so the new customer's ids would never reach the stored token.
+- **A customer with no vaulted tokens lists as an empty list instead of
+  failing.** The listing maps `404 CUSTOMER_ID_NOT_FOUND` to `[]`; every other
+  failure (including a `400`, which can no longer occur legitimately now that
+  the queried id is always 22 characters) still surfaces as an error.
+- **A vault setup-token response without a status is an upstream fault.**
+  `getVaultSetupToken` throws `UNEXPECTED_STATE` instead of returning the
+  `status: ""` sentinel, which callers could mistake for "not approved yet".
+
+### Changed
+
+- **Checkout vaulting now sends the derived customer id and the
+  permit-multiple flag.** The `store_in_vault: ON_SUCCESS` branch keeps its
+  shape and adds `paymentSource.paypal.attributes.customer.id` (the derived
+  22-character id) and `attributes.vault.permitMultiplePaymentTokens`. Orders v2
+  treats `customer.id` and `customer.merchant_customer_id` as mutually
+  exclusive and rejects both together with `422 INCOMPATIBLE_PARAMETER_VALUE`,
+  so this path sends no `customer.merchantCustomerId` — and neither does the
+  vault-approval path, for the stickiness reason above.
+
+### Notes
+
+- **Tokens minted before 0.9.0 cannot be backfilled.** They carry a
+  PayPal-generated `customer.id` and no API can change it - only deleting and
+  re-vaulting would. They keep charging through the stored vault id, but they
+  are not returned by the listing.
+- **Re-binding accumulates tokens.** With `permitMultiplePaymentTokens: true`
+  a repeat approval mints a new token rather than replacing the old one.
+  Deleting the old token could break a subscription that still references it,
+  so accumulation is accepted for now.
+- **`completeVaultApproval()` no longer returns a `customer_id`.** The exchange
+  response carries only the derived `customer.id`; consumers read `status` and
+  `vault_id`.
+
 ## [0.8.0] - 2026-10-02
 
 ### Added

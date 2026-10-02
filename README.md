@@ -195,17 +195,24 @@ off-session renewal path. `store_in_vault: ON_SUCCESS` is untouched and stays
 the checkout path; the two coexist.
 
 The caller must already have a customer — pass your **merchant-side** customer
-id (for example the Medusa customer id). It is sent to PayPal as
-`customer.merchantCustomerId`, so no PayPal customer needs to be created first.
-`return_url` and `cancel_url` must be **absolute http(s) URLs**; anything else
-is rejected with `INVALID_DATA` before PayPal is called.
+id (for example the Medusa customer id). A deterministic 22-character id
+derived from it is sent to PayPal as `customer.id` — the merchant-supplied id
+PayPal's payment-token list endpoint resolves by — so no PayPal customer needs
+to be created first. The merchant id itself is **not** sent to PayPal: PayPal
+freezes a customer record's `customer.id` at the first `merchant_customer_id`
+association and would ignore the derived id afterwards, and Orders v2 rejects
+the two fields together. Tokens minted before 0.9.0 carry a PayPal-generated
+`customer.id` instead: they keep charging through the stored vault id, but they
+cannot be backfilled and are not listable. `return_url` and `cancel_url` must
+be **absolute http(s) URLs**; anything else is rejected with `INVALID_DATA`
+before PayPal is called.
 
 ```ts
 const svc = container.resolve("paypalSubscription")
 
 // 1. Create the setup token and send the buyer to approve_url.
 const { setup_token_id, approve_url } = await svc.startVaultApproval({
-  customer_id: customer.id, // your merchant-side id -> customer.merchantCustomerId
+  customer_id: customer.id, // merchant-side id -> derived 22-char customer.id (never sent to PayPal)
   return_url: "https://shop.example.com/paypal/return",
   cancel_url: "https://shop.example.com/paypal/cancel",
 })

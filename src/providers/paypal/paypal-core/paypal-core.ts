@@ -25,6 +25,7 @@ import {
 } from "@paypal/paypal-server-sdk";
 import { CartAddressDTO, CartLineItemDTO } from "@medusajs/framework/types";
 import { parsePhoneNumberFromString } from "libphonenumber-js";
+import { createHash } from "node:crypto";
 import { PaypalPluginOptionsType } from "../service";
 import { MedusaError } from "@medusajs/framework/utils";
 
@@ -61,6 +62,17 @@ export interface PaypalCreateOrderInput {
  */
 export function formatPaypalAmount(major: number, fractionDigits: number): string {
   return major.toFixed(fractionDigits)
+}
+
+/**
+ * Bridges a merchant-side customer id to the id PayPal's Vault v3 API
+ * resolves by. `customer.id` is merchant-supplied and capped at 22 characters
+ * (`[0-9a-zA-Z_-]`), while Medusa customer ids are 30 (`cus_` + a 26-char
+ * ULID), so the merchant id cannot be sent as-is. Hashing is deterministic:
+ * every instance derives the same value with no storage and no migration.
+ */
+export function derivePaypalCustomerId(merchantCustomerId: string): string {
+  return createHash("sha256").update(merchantCustomerId).digest("base64url").slice(0, 22);
 }
 
 export interface PaypalBillingProductInput {
@@ -401,8 +413,17 @@ export class PaypalService {
                 vault: {
                   storeInVault: StoreInVaultInstruction.OnSuccess,
                   usageType: PaypalPaymentTokenUsageType.Merchant,
+                  permitMultiplePaymentTokens: true,
                 },
-                customer: { merchantCustomerId: vaultCustomerId },
+                // Orders v2 treats `customer.id` and
+                // `customer.merchant_customer_id` as mutually exclusive: sending
+                // both is rejected with `422 INCOMPATIBLE_PARAMETER_VALUE`
+                // (both fields flagged). Like the vault-approval path
+                // (`createVaultSetupToken`), this path sends only the derived
+                // id; the merchant id is never sent to PayPal.
+                customer: {
+                  id: derivePaypalCustomerId(vaultCustomerId),
+                },
               },
             },
           }
@@ -496,27 +517,50 @@ export class PaypalService {
 
   /**
    * Lists the vaulted PayPal wallets of a customer. `customerId` is the
-   * merchant-side customer id that was associated with the wallet when it
-   * was saved (merchant_customer_id at vault time).
+   * merchant-side customer id the wallet was saved with; PayPal's list
+   * endpoint resolves by its own `customer.id`, so the merchant id is derived
+   * into the 22-character id the vault flows send as `customer.id`.
    */
   async listVaultedPaymentMethods(
     customerId: string
   ): Promise<PaymentTokenResponse[]> {
-    const response = await this.vaultController.listCustomerPaymentTokens({
-      customerId,
-    });
+    try {
+      const response = await this.vaultController.listCustomerPaymentTokens({
+        customerId: derivePaypalCustomerId(customerId),
+      });
 
-    return response.result.paymentTokens ?? [];
+      return response.result.paymentTokens ?? [];
+    } catch (error) {
+      // D9 fail-soft: the derived id is always 22 characters, so a 404 can
+      // only mean "this customer has no vaulted tokens" (a valid-length id
+      // that matches nothing). A 400 (INVALID_STRING_LENGTH) can no longer
+      // occur legitimately and must stay an error, as must every other
+      // status.
+      const { status, code } = extractPaypalErrorCode(error);
+
+      if (status === 404 && code === "CUSTOMER_ID_NOT_FOUND") {
+        return [];
+      }
+
+      throw error;
+    }
   }
 
   /**
    * Creates a Vault v3 setup token for a customer's PayPal wallet. The
-   * caller's customer id is a merchant-side id and goes into the top-level
-   * `customer.merchantCustomerId` - a sibling of `paymentSource`, because the
-   * wallet request object has no customer member. Returns the setup token id
-   * plus the payer-approval link the storefront must send the buyer to.
-   * `permitMultiplePaymentTokens` stays at PayPal's default (false): one
-   * wallet maps to one merchant customer.
+   * caller's customer id is a merchant-side id: `derivePaypalCustomerId`
+   * turns it into the 22-character id sent as the top-level `customer.id` - a
+   * sibling of `paymentSource`, because the wallet request object has no
+   * customer member. The derived id is the only customer identifier sent; the
+   * merchant id stays on our side and never reaches PayPal. The merchant id
+   * cannot be sent alongside either: PayPal fixes a customer record's
+   * `customer.id` at the first `merchant_customer_id` association and ignores
+   * a later derived id, so a token minted that way would not be listable by
+   * the derived id. Returns the setup token id plus the payer-approval link
+   * the storefront must send the buyer to. `permitMultiplePaymentTokens: true`
+   * mints a token per customer rather than reusing the payer's existing one,
+   * so the token carries this customer's id instead of a previously vaulted
+   * customer's.
    */
   async createVaultSetupToken(
     input: PaypalVaultSetupTokenInput,
@@ -527,10 +571,11 @@ export class PaypalService {
     const response = await callVaultApi("create setup token", () =>
       this.vaultController.createSetupToken({
         body: {
-          customer: { merchantCustomerId: input.customer_id },
+          customer: { id: derivePaypalCustomerId(input.customer_id) },
           paymentSource: {
             paypal: {
               usageType: PaypalPaymentTokenUsageType.Merchant,
+              permitMultiplePaymentTokens: true,
               experienceContext: {
                 returnUrl: input.return_url,
                 cancelUrl: input.cancel_url,
@@ -571,9 +616,16 @@ export class PaypalService {
     const status: PaymentTokenStatus | undefined = response.result.status;
     const approveUrl = extractApproveUrl(response.result.links);
 
+    if (!status) {
+      throw new MedusaError(
+        MedusaError.Types.UNEXPECTED_STATE,
+        "PayPal vault setup token response is missing the status",
+      );
+    }
+
     return {
       setup_token_id: response.result.id ?? id,
-      status: status ?? "",
+      status,
       ...(approveUrl && { approve_url: approveUrl }),
     };
   }
