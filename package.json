@@ -1,6 +1,6 @@
 {
   "name": "@mengyyy369/medusa-paypal",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Medusa v2 PayPal payment provider with vaulted off-session renewals and official PayPal Subscriptions",
   "author": "MengYYY369",
   "license": "MIT",
