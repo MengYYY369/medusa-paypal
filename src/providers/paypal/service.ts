@@ -15,6 +15,8 @@ import {
   CapturePaymentInput,
   CapturePaymentOutput,
   DeletePaymentInput,
+  DeletePaymentMethodInput,
+  DeletePaymentMethodOutput,
   DeletePaymentOutput,
   GetPaymentStatusInput,
   GetPaymentStatusOutput,
@@ -53,6 +55,27 @@ export interface PaypalPaymentError {
   retryable: boolean;
   avsCode?: string;
   cvvCode?: string;
+}
+
+/**
+ * The payment module hands the provider its account-holder record, which
+ * carries the provider `external_id`, but the published
+ * `PaymentAccountHolderDTO` types only `data`. Read the field structurally,
+ * exactly as `listPaymentMethods` already does - `data` is declared optional
+ * only so the published DTO stays assignable to this view. An empty value
+ * counts as absent so a blank id cannot resolve a PayPal customer.
+ */
+function readAccountHolderExternalId(context: {
+  account_holder?: {
+    external_id?: string | null;
+    data?: Record<string, unknown>;
+  } | null;
+} | undefined): string | undefined {
+  const externalId = context?.account_holder?.external_id;
+
+  return typeof externalId === "string" && externalId.trim() !== ""
+    ? externalId
+    : undefined;
 }
 
 type PaypalErrorDetail = {
@@ -1062,6 +1085,54 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
           email: token.paymentSource?.paypal?.emailAddress ?? null,
         },
       }));
+  }
+
+  /**
+   * Deletes a vaulted PayPal wallet for the account holder carried by the
+   * context. The id is never trusted on its own: it must appear in the
+   * holder's own vaulted tokens first, so this can never become a blind
+   * delete-by-id primitive for another customer's wallet (IDOR). A token
+   * already gone at PayPal is the desired end state, so the delete is
+   * idempotent.
+   *
+   * The token id is a secret: the failure raised for an unowned id carries no
+   * id, and the PayPal call's own failures are sanitized by
+   * `toVaultFailure` - neither the response nor a log line may echo it.
+   */
+  async deletePaymentMethod(
+    input: DeletePaymentMethodInput
+  ): Promise<DeletePaymentMethodOutput> {
+    const id = input.data?.id;
+
+    if (!id) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "A payment method id is required"
+      );
+    }
+
+    const externalId = readAccountHolderExternalId(input.context);
+
+    if (!externalId) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "Deleting a payment method requires an account holder"
+      );
+    }
+
+    const client = await this.getClient();
+    const tokens = await client.listVaultedPaymentMethods(String(externalId));
+
+    if (!tokens.some((token) => token.id === id)) {
+      throw new MedusaError(
+        MedusaError.Types.NOT_FOUND,
+        "Payment method not found for this account holder"
+      );
+    }
+
+    await client.deleteVaultedPaymentMethod(id);
+
+    return {};
   }
 
   /**

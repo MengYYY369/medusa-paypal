@@ -662,6 +662,27 @@ export class PaypalService {
     return { vault_id: vaultId };
   }
 
+  /**
+   * Deletes a vaulted payment token. A 404 is treated as success: the desired
+   * end state is "no such token", so a retried unbind stays idempotent. Every
+   * other failure is sanitized by `toVaultFailure` - the token id is a secret
+   * PayPal echoes into error descriptions, so only the HTTP status and issue
+   * code may reach the caller or the logs.
+   */
+  async deleteVaultedPaymentMethod(id: string): Promise<void> {
+    try {
+      await this.vaultController.deletePaymentToken(id);
+    } catch (error) {
+      const { status } = extractPaypalErrorCode(error);
+
+      if (status === 404) {
+        return;
+      }
+
+      throw toVaultFailure("delete payment token", error);
+    }
+  }
+
   async refundPayment(captureIds: string[]): Promise<Refund[]> {
     const refunds: Refund[] = [];
 

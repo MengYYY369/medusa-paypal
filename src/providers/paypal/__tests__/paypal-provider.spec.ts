@@ -613,6 +613,82 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
       expect(listSpy).not.toHaveBeenCalled()
     })
   })
+
+  describe("deletePaymentMethod", () => {
+    const context = { account_holder: { external_id: "cus_1" } }
+
+    it("deletes a token that belongs to the account holder", async () => {
+      const provider = createProvider()
+      const listSpy = jest
+        .spyOn(await clientOf(provider), "listVaultedPaymentMethods")
+        .mockResolvedValue([{ id: "vault-token-1" }] as never)
+      const deleteSpy = jest
+        .spyOn(await clientOf(provider), "deleteVaultedPaymentMethod")
+        .mockResolvedValue(undefined as never)
+
+      await expect(
+        provider.deletePaymentMethod({
+          context,
+          data: { id: "vault-token-1" },
+        } as never)
+      ).resolves.toEqual({})
+
+      expect(listSpy).toHaveBeenCalledWith("cus_1")
+      expect(deleteSpy).toHaveBeenCalledWith("vault-token-1")
+    })
+
+    it("refuses a token that is not in the account holder's vault", async () => {
+      const provider = createProvider()
+      jest
+        .spyOn(await clientOf(provider), "listVaultedPaymentMethods")
+        .mockResolvedValue([{ id: "vault-token-1" }] as never)
+      const deleteSpy = jest.spyOn(
+        await clientOf(provider),
+        "deleteVaultedPaymentMethod"
+      )
+
+      await expect(
+        provider.deletePaymentMethod({
+          context,
+          data: { id: "someone-elses-token" },
+        } as never)
+      ).rejects.toMatchObject({
+        type: MedusaError.Types.NOT_FOUND,
+        // The refusal names no id: the token id is a secret.
+        message: expect.not.stringContaining("someone-elses-token"),
+      })
+
+      expect(deleteSpy).not.toHaveBeenCalled()
+    })
+
+    it("requires an account holder", async () => {
+      const provider = createProvider()
+      const listSpy = jest.spyOn(
+        await clientOf(provider),
+        "listVaultedPaymentMethods"
+      )
+
+      await expect(
+        provider.deletePaymentMethod({ context: {}, data: { id: "vault-token-1" } })
+      ).rejects.toMatchObject({
+        type: MedusaError.Types.INVALID_DATA,
+        message: expect.stringContaining("account holder"),
+      })
+
+      expect(listSpy).not.toHaveBeenCalled()
+    })
+
+    it("requires a payment method id", async () => {
+      const provider = createProvider()
+
+      await expect(
+        provider.deletePaymentMethod({ context, data: {} } as never)
+      ).rejects.toMatchObject({
+        type: MedusaError.Types.INVALID_DATA,
+        message: expect.stringContaining("payment method id"),
+      })
+    })
+  })
 })
 
 describe("PaypalModuleService (resolved configuration)", () => {

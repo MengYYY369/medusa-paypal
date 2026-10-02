@@ -50,6 +50,7 @@ type MockVaultController = {
     Promise<unknown>,
     [{ customerId: string }]
   >;
+  deletePaymentToken: jest.Mock<Promise<unknown>, [string]>;
 };
 
 function makeMockVaultController(): MockVaultController {
@@ -58,6 +59,7 @@ function makeMockVaultController(): MockVaultController {
     getSetupToken: jest.fn(),
     createPaymentToken: jest.fn(),
     listCustomerPaymentTokens: jest.fn(),
+    deletePaymentToken: jest.fn(),
   };
 }
 
@@ -472,6 +474,67 @@ describe("PaypalService.createVaultPaymentToken", () => {
     expect(error.type).toBe(MedusaError.Types.UNEXPECTED_STATE);
     expect(error.message).toContain("payment token id");
   });
+});
+
+describe("PaypalService.deleteVaultedPaymentMethod", () => {
+  it("deletes the token by id", async () => {
+    const mock = makeMockVaultController();
+    mock.deletePaymentToken.mockResolvedValue({ result: undefined });
+    const client = makeClient(mock);
+
+    await expect(
+      client.deleteVaultedPaymentMethod("VAULT-1"),
+    ).resolves.toBeUndefined();
+    expect(mock.deletePaymentToken).toHaveBeenCalledTimes(1);
+    expect(mock.deletePaymentToken).toHaveBeenCalledWith("VAULT-1");
+  });
+
+  it("treats a 404 as already deleted", async () => {
+    const mock = makeMockVaultController();
+    mock.deletePaymentToken.mockRejectedValue({
+      statusCode: 404,
+      result: {
+        name: "RESOURCE_NOT_FOUND",
+        details: [{ issue: "INVALID_RESOURCE_ID" }],
+      },
+    });
+    const client = makeClient(mock);
+
+    await expect(
+      client.deleteVaultedPaymentMethod("VAULT-1"),
+    ).resolves.toBeUndefined();
+  });
+
+  it.each([
+    [500, "INTERNAL_SERVER_ERROR"],
+    [401, "AUTHENTICATION_FAILURE"],
+  ])(
+    "wraps a %i as UNEXPECTED_STATE without echoing the token id",
+    async (statusCode, code) => {
+      const mock = makeMockVaultController();
+      mock.deletePaymentToken.mockRejectedValue({
+        statusCode,
+        result: {
+          name: code,
+          message: `Payment token VAULT-SECRET-123 could not be deleted`,
+          details: [{ issue: code }],
+        },
+      });
+      const client = makeClient(mock);
+
+      const error = await captureRejection(
+        client.deleteVaultedPaymentMethod("VAULT-SECRET-123"),
+      );
+
+      expect(error.type).toBe(MedusaError.Types.UNEXPECTED_STATE);
+      expect(error.message).toContain(code);
+      expect(error.message).toContain(String(statusCode));
+      // The token id is a secret: PayPal echoes it into descriptions, which
+      // must never reach the caller or a log line.
+      expect(error.message).not.toContain("VAULT-SECRET-123");
+      expectNotClassifierPreserved(error.type);
+    },
+  );
 });
 
 describe("PaypalService vault upstream failures", () => {

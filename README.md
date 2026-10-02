@@ -241,6 +241,52 @@ const supported =
 The package root also exports `PAYPAL_VAULT_BINDING_CAPABILITY`
 (`"vault-binding"`) as documentation of what that duck-type means.
 
+#### Binding via the host-configurable binder
+
+For the `medusa-payment-methods` plugin, the same flow is exposed as a
+`PaymentMethodBinder` the host passes in through the plugin's `binders` map.
+Credentials are supplied explicitly — the same values the PayPal provider is
+registered with — so the package reads no environment variables of its own and
+needs no container reference. Import the factory from the `binder` subpath:
+
+```ts
+import { createPaypalBinder } from "@mengyyy369/medusa-paypal/binder"
+
+// medusa-config.ts
+{
+  resolve: "@mengyyy369/medusa-payment-methods",
+  options: {
+    binders: {
+      // The key is the payment module registration key (pp_<identifier>_<id>).
+      pp_paypal_paypal: createPaypalBinder({
+        clientId: process.env.PAYPAL_CLIENT_ID,
+        clientSecret: process.env.PAYPAL_CLIENT_SECRET,
+        isSandbox: process.env.PAYPAL_IS_SANDBOX === "true",
+      }),
+    },
+  },
+}
+```
+
+The returned object implements `{ start, complete }`: `start` creates the setup
+token and returns `{ approvalUrl, state }` (the state is the setup token id),
+and `complete` exchanges the approved token and returns
+`{ paymentMethodId, data }`. `returnUrl` / `cancelUrl` are passed through to
+PayPal unchanged.
+
+### Deleting a saved payment method
+
+The provider implements the optional `deletePaymentMethod` (payment provider
+interface, `@since 2.16.0`). It resolves the account holder from the call
+context, then **requires the target id to be one of that holder's own vaulted
+tokens** before calling `DELETE /v1/vault/payment-tokens/{id}` — an id that is
+not in the holder's vault is refused, so this can never act as a blind
+delete-by-id primitive for another customer's wallet. A `404` from PayPal means
+the token is already gone and is treated as success, so a retried unbind is
+idempotent. The token id is a secret: a failure never carries it, and the
+PayPal call's errors are sanitized to the HTTP status and issue code before
+they reach a response or a log line.
+
 > **Caller-side security note.** The route that accepts `return_url` /
 > `cancel_url` must restrict both to the storefront origin, or an attacker can
 > redirect the approval back to a host they control. That route lives in the
