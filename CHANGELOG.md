@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-10-02
+
+### Added
+
+- **No-charge payment-method binding (vault approval).** A second, independent
+  way to obtain a PayPal vault id, for cases the checkout path cannot serve -
+  most importantly a free trial, which has nothing to capture and therefore
+  cannot use `store_in_vault: ON_SUCCESS`. The plugin creates a PayPal Vault v3
+  setup token, the buyer approves on PayPal, and the plugin exchanges the
+  approved token for a permanent vault id. No money moves at any step. The
+  resulting vault id is the same kind of value the checkout path stores as
+  `payment_method`, so it charges through the existing off-session renewal
+  path.
+- **`startVaultApproval({ customer_id, return_url, cancel_url })`** on the
+  `paypalSubscription` module service (resolved as
+  `container.resolve("paypalSubscription")`). Returns
+  `{ setup_token_id, approve_url }`; send the payer to `approve_url`.
+  `return_url` and `cancel_url` must be absolute http(s) URLs or the call is
+  rejected with `INVALID_DATA`.
+- **`completeVaultApproval({ setup_token_id })`** on the same service. Returns
+  `{ status, vault_id?, customer_id? }`. While the payer has not approved, only
+  `status` is present and there is no `vault_id`; once the payer has approved
+  the token is exchanged and `vault_id` is returned. `APPROVED`, `VAULTED` and
+  `TOKENIZED` all mean approved-and-exchangeable (sandbox reads back
+  `VAULTED`, not `APPROVED`).
+- **`PAYPAL_VAULT_BINDING_CAPABILITY`** (`"vault-binding"`), exported from the
+  package root as documentation of the capability. Detection is duck-typing -
+  check that the resolved service exposes both `startVaultApproval` and
+  `completeVaultApproval` as functions.
+- **Vault v3 client methods** on the PayPal core service: create a setup token,
+  read a setup token's status, and create a payment token from an approved
+  setup token.
+
+### Fixed
+
+- **PayPal request bodies are no longer logged.** The SDK client logged every
+  request body at `LogLevel.Info` (session ids, amounts, vault ids, setup
+  token ids). `logRequest.logBody` is now `false`, so a vault id or setup
+  token id can never reach the logs; response headers are still logged.
+
+### Notes
+
+- **`store_in_vault: ON_SUCCESS` is unchanged.** The checkout vault path still
+  behaves exactly as before; this release adds a second, independent way to
+  obtain a vault id. The two vault paths are gated separately on the PayPal
+  application (see the README's "PayPal account requirements"), so an
+  application without the "Save payment methods" feature can still vault at
+  order time while the direct vault calls fail with a bare
+  `403 NOT_AUTHORIZED`.
+- Upgrading from 0.7.1 needs **no** database migration and no configuration
+  change.
+- The full chain - setup token, payer approval, exchange, and an off-session
+  charge with the resulting vault id - was verified against the PayPal
+  sandbox during development. The production account gates remain a pre-launch
+  checklist item (see the README's "PayPal account requirements").
+
 ## [0.7.1] - 2026-09-29
 
 ### Changed

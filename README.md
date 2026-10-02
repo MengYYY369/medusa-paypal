@@ -182,6 +182,64 @@ Medusa error carrying `decline_code` (for example `INSTRUMENT_DECLINED`) so the
 engine's dunning classification can treat it permanently and recover through a
 payment-method change instead of a pointless retry.
 
+### No-charge payment-method binding (vault approval)
+
+The checkout path above binds the wallet **during an order capture**, so it can
+never produce a vault id for a free trial — a trial has nothing to capture. The
+vault-approval flow is a second, independent way to obtain a vault id: the
+plugin creates a PayPal Vault v3 setup token, the buyer approves on PayPal, and
+the plugin exchanges the approved token for a permanent vault id. **No money
+moves at any step.** The resulting vault id is the same kind of value the
+checkout path stores as `payment_method`, so it charges through the existing
+off-session renewal path. `store_in_vault: ON_SUCCESS` is untouched and stays
+the checkout path; the two coexist.
+
+The caller must already have a customer — pass your **merchant-side** customer
+id (for example the Medusa customer id). It is sent to PayPal as
+`customer.merchantCustomerId`, so no PayPal customer needs to be created first.
+`return_url` and `cancel_url` must be **absolute http(s) URLs**; anything else
+is rejected with `INVALID_DATA` before PayPal is called.
+
+```ts
+const svc = container.resolve("paypalSubscription")
+
+// 1. Create the setup token and send the buyer to approve_url.
+const { setup_token_id, approve_url } = await svc.startVaultApproval({
+  customer_id: customer.id, // your merchant-side id -> customer.merchantCustomerId
+  return_url: "https://shop.example.com/paypal/return",
+  cancel_url: "https://shop.example.com/paypal/cancel",
+})
+
+// 2. After the buyer returns, exchange the approved token.
+const { status, vault_id, customer_id } = await svc.completeVaultApproval({
+  setup_token_id,
+})
+// While the payer has not approved: only `status` is present, no `vault_id`.
+// Once approved: `vault_id` is set and can be stored as `payment_method`.
+// `APPROVED`, `VAULTED` and `TOKENIZED` all mean approved-and-exchangeable —
+// sandbox reads back `VAULTED`, not `APPROVED`.
+```
+
+Consumers that must work with or without this capability detect it by
+duck-typing the resolved service (the reorder engine has no dependency on this
+package, so it cannot import a constant):
+
+```ts
+const svc = container.resolve("paypalSubscription")
+const supported =
+  typeof svc.startVaultApproval === "function" &&
+  typeof svc.completeVaultApproval === "function"
+```
+
+The package root also exports `PAYPAL_VAULT_BINDING_CAPABILITY`
+(`"vault-binding"`) as documentation of what that duck-type means.
+
+> **Caller-side security note.** The route that accepts `return_url` /
+> `cancel_url` must restrict both to the storefront origin, or an attacker can
+> redirect the approval back to a host they control. That route lives in the
+> reorder engine, not in this package — it is a reorder-repo follow-up and is
+> **not** addressed by this release.
+
 ### PayPal account requirements
 
 Vaulting is gated on the PayPal account and application:
@@ -194,6 +252,12 @@ Vaulting is gated on the PayPal account and application:
    vault tests fail.
 4. RDA (risk data) is mandatory on customer-approved flows; collect it through
    the official PayPal JS SDK.
+
+> These gates **cannot be verified without production access**. A sandbox
+> application without the "Save payment methods" feature fails the direct vault
+> calls (the vault-approval flow above) with a bare `403 NOT_AUTHORIZED`.
+> Order-time `store_in_vault: ON_SUCCESS` vaulting can still work on such an
+> application, so the two vault paths are gated separately.
 
 ---
 
