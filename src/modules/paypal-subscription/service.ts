@@ -123,6 +123,7 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
   protected pluginOptions: PaypalSubscriptionModuleOptions;
   private eventBus?: unknown;
   private settingsReadFailureWarned = false;
+  private environmentSourceWarned = false;
   private engineCache?: { key: string; engine: SubscriptionEngine };
 
   constructor(container: InjectedDependencies, options: PaypalSubscriptionModuleOptions = {}) {
@@ -257,6 +258,14 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
       providerOptions: layers.providerOptions,
       pluginOptions: this.pluginOptions as Record<string, unknown>,
     });
+
+    if (sources.isSandbox === "none" && !this.environmentSourceWarned) {
+      this.environmentSourceWarned = true;
+      this.logger.warn(
+        "PayPal environment (is_sandbox) is not set in the database, the payment provider options, or the plugin options; defaulting to live. " +
+          "Set it explicitly so a sandbox merchant never calls the live API by accident."
+      );
+    }
 
     return {
       config,
@@ -525,12 +534,14 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
   /**
    * Client for the vault-binding flow. Built from the module's own resolved
    * configuration (db -> providerOptions -> pluginOptions) because the DB
-   * settings row is the authoritative layer in production: the host registers
-   * this plugin as a bare string, so module options never arrive and a client
-   * built from anything else would silently ignore an admin edit. Do not
-   * "simplify" this to module options, and do not resolve the payment module -
-   * this module declares no dependencies, so its local container cannot reach
-   * it. Overridable so unit tests can inject a mock client.
+   * settings row is the authoritative layer in production, and the plugin
+   * options are the last resort: a host that registers the plugin without
+   * options (a bare string) leaves this path with nothing but the DB row, and
+   * a null row then resolves to live. The host is expected to pass
+   * `{ isSandbox }`; a fully unset environment warns once. Do not resolve the
+   * payment module - this module declares no dependencies, so its local
+   * container cannot reach it. Overridable so unit tests can inject a mock
+   * client.
    */
   protected async getVaultClient(): Promise<PaypalService> {
     const { config } = await this.getResolvedPaypalConfig();

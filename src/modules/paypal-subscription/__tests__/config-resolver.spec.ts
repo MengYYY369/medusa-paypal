@@ -388,8 +388,14 @@ describe("getResolvedPaypalConfig", () => {
     expect(first.version).toBe(0);
     expect(first.sources.clientId).toBe("provider_options");
     expect(second.config.clientId).toBe("plugin-id");
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-    expect(logger.warn.mock.calls[0][0]).toMatch(/db:migrate/);
+
+    const warnings = logger.warn.mock.calls.map((call) => String(call[0]));
+    expect(warnings.filter((message) => /db:migrate/.test(message))).toHaveLength(1);
+    // The unreadable row also leaves the environment unset, so the warn-once
+    // environment notice accompanies the migration hint - once, not per read.
+    expect(
+      warnings.filter((message) => message.includes("is_sandbox"))
+    ).toHaveLength(1);
   });
 });
 

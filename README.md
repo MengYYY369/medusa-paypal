@@ -517,6 +517,16 @@ environment-variable fallback: an option you do not set in `medusa-config`
 either comes from the admin settings row or stays unset. The admin layer wins
 field by field; see [Admin Configuration](#-admin-configuration) below.
 
+> **Vault binding and the environment.** The vault-binding flow builds its
+> client from the module's own chain: the admin settings row first, then the
+> plugin `options` above. The payment provider's `providerOptions` are *not*
+> visible to it (the module declares no dependencies, so its local container
+> cannot reach the payment module), so register the plugin with
+> `options: { isSandbox }` — a bare-string registration leaves that last layer
+> empty, and a null `is_sandbox` row then silently builds a **live** client
+> while the storefront still reports sandbox. Since 0.9.2 a fully unset
+> environment logs one warning instead of staying silent.
+
 ---
 
 ## 🛠 Admin Configuration

@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-10-02
+
+### Fixed
+
+- **The vault-binding path can no longer resolve to the live API by
+  accident.** The module's own configuration chain is
+  `db -> provider options -> plugin options`, but the module declares no
+  dependencies, so its local container cannot reach the payment provider's
+  `providerOptions`; the last layer it can actually see is the plugin
+  registration options. A host that registered the plugin as a bare string
+  (no `options`) and left `is_sandbox` null in the database silently got a
+  live client for the vault flow while the storefront reported the sandbox
+  environment - a sandbox merchant's binding attempt then failed with a 401
+  from the live API. Register the plugin with
+  `options: { isSandbox: process.env.PAYPAL_IS_SANDBOX === "true" }`
+  (mirroring the payment provider) and/or save the environment in the admin
+  settings page.
+- **One-time warning when no layer sets the environment.** When the database
+  row, the provider options and the plugin options all leave `is_sandbox`
+  unset, the resolved configuration still defaults to live, but the service
+  now logs a single warning naming the field instead of staying silent.
+
+### Added
+
+- Vault-client environment regression tests: the client built for
+  `is_sandbox` `true` / `false` / `null`-with-plugin-options /
+  `null`-with-no-layer is asserted against its `baseUrl` and `environment`.
+
 ## [0.9.1] - 2026-10-02
 
 ### Changed

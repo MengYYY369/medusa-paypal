@@ -204,3 +204,77 @@ describe("PaypalSubscriptionModuleService vault binding", () => {
     expect(PAYPAL_VAULT_BINDING_CAPABILITY).toBe("vault-binding");
   });
 });
+
+describe("PaypalSubscriptionModuleService vault client environment", () => {
+  const configuredRow = (isSandbox: boolean | null) => ({
+    id: "ppset_singleton",
+    client_id: "client-id",
+    client_secret: "client-secret",
+    is_sandbox: isSandbox,
+  });
+
+  const vaultClientOf = (service: PaypalSubscriptionModuleService) =>
+    (
+      service as unknown as {
+        getVaultClient: () => Promise<{ baseUrl: string; environment: string }>;
+      }
+    ).getVaultClient();
+
+  const environmentWarnings = (service: PaypalSubscriptionModuleService) =>
+    (
+      service as unknown as { logger: { warn: jest.Mock } }
+    ).logger.warn.mock.calls
+      .map((call) => String(call[0]))
+      .filter((message) => message.includes("is_sandbox"));
+
+  it("builds a sandbox client when the database says sandbox", async () => {
+    const { service, crud } = makeService();
+    crud.listPaypalSettings.mockResolvedValue([configuredRow(true)]);
+
+    await expect(vaultClientOf(service)).resolves.toMatchObject({
+      baseUrl: "https://api-m.sandbox.paypal.com",
+      environment: "sandbox",
+    });
+    expect(environmentWarnings(service)).toHaveLength(0);
+  });
+
+  it("builds a live client when the database says live", async () => {
+    const { service, crud } = makeService();
+    crud.listPaypalSettings.mockResolvedValue([configuredRow(false)]);
+
+    await expect(vaultClientOf(service)).resolves.toMatchObject({
+      baseUrl: "https://api-m.paypal.com",
+      environment: "live",
+    });
+    expect(environmentWarnings(service)).toHaveLength(0);
+  });
+
+  it("takes the environment from the plugin options when the row leaves it null", async () => {
+    // The production defect this guards: the host registered the plugin as a
+    // bare string, so plugin options never arrived; with the row null the
+    // vault client silently called the live API.
+    const { service, crud } = makeService({ isSandbox: true });
+    crud.listPaypalSettings.mockResolvedValue([configuredRow(null)]);
+
+    await expect(vaultClientOf(service)).resolves.toMatchObject({
+      baseUrl: "https://api-m.sandbox.paypal.com",
+      environment: "sandbox",
+    });
+    expect(environmentWarnings(service)).toHaveLength(0);
+  });
+
+  it("defaults to live and warns once when no layer sets the environment", async () => {
+    const { service, crud } = makeService();
+    crud.listPaypalSettings.mockResolvedValue([configuredRow(null)]);
+
+    await expect(vaultClientOf(service)).resolves.toMatchObject({
+      baseUrl: "https://api-m.paypal.com",
+      environment: "live",
+    });
+
+    // The second read must not warn again.
+    await vaultClientOf(service);
+
+    expect(environmentWarnings(service)).toHaveLength(1);
+  });
+});
