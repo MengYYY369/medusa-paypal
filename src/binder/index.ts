@@ -61,6 +61,8 @@ export type PaymentMethodBinderCompleteResult = {
 };
 
 export type PaymentMethodBinder = {
+  /** Bind family for the storefront's bind rows (2026-10-04, item 5/10). */
+  kind?: string
   start(
     input: PaymentMethodBinderStartInput,
   ): Promise<PaymentMethodBinderStartResult>;
@@ -97,6 +99,7 @@ export function createPaypalBinder(
   };
 
   return {
+    kind: "paypal",
     async start({ customerId, returnUrl, cancelUrl }) {
       const started = await startVaultApproval(getClient(), {
         customer_id: customerId,

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.9.4 — 2026-10-04
+
+- The exported binder now declares `kind: "paypal"` (2026-10-04 production
+  walkthrough, item 5/10): `medusa-payment-methods` surfaces it in the
+  `providers` list so the storefront can render one bind row per provider.
+
+
 ## [0.9.3] - 2026-10-03
 
 ### Added
