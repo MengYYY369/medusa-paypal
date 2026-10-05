@@ -8,7 +8,9 @@ import PaypalSubscription from "./models/paypal-subscription";
 import PaypalSettings from "./models/paypal-settings";
 import PaypalSettingsAudit from "./models/paypal-settings-audit";
 import {
+  assertNoCredentialEnvironmentMismatch,
   assertPaypalConfigured,
+  detectDeclaredCredentialEnvironmentMismatch,
   isPaypalConfigField,
   maskSecret,
   mergePaypalConfigLayers,
@@ -16,6 +18,8 @@ import {
   PAYPAL_CONFIG_FIELDS,
   PaypalConfigField,
   PaypalConfigSource,
+  PaypalCredentialEnvironmentMismatch,
+  PaypalEnvironment,
   PaypalResolvedConfig,
 } from "./lib/config-resolver";
 import { PaypalService } from "../../providers/paypal/paypal-core/paypal-core";
@@ -101,6 +105,14 @@ export type PaypalSubscriptionModuleOptions = SubscriptionEngineOptions & {
   clientId?: string;
   clientSecret?: string;
   isSandbox?: boolean;
+  /**
+   * The environment this option layer's credential set belongs to. Declared
+   * by hosts that keep per-environment credential files: when the resolved
+   * credentials are this layer's own and the resolved environment (is_sandbox)
+   * contradicts the declaration, every PayPal entry point refuses to run
+   * instead of calling the wrong environment's API (walkthrough R11 / #18).
+   */
+  credentialEnvironment?: PaypalEnvironment;
   webhookId?: string;
   subscriptionWebhookId?: string;
 };
@@ -143,7 +155,11 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
    * layer is `plugins[].options`, exactly as before.
    */
   private async resolveEngine(): Promise<SubscriptionEngine> {
-    const { config, version } = await this.getResolvedPaypalConfig();
+    const {
+      config,
+      version,
+      credentialEnvironmentMismatch,
+    } = await this.getResolvedPaypalConfig();
     const key = `${version}:${JSON.stringify(config)}`;
 
     if (this.engineCache?.key === key) {
@@ -151,6 +167,10 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
     }
 
     assertPaypalConfigured(config);
+    // Fail fast on a credential set declared for the wrong environment: the
+    // engine charges real vault ids off-session, the worst place to discover
+    // sandbox credentials were pointed at the live API (R11 / #18).
+    assertNoCredentialEnvironmentMismatch(credentialEnvironmentMismatch);
 
     const engine = new SubscriptionEngine({
       client: new PaypalService(config),
@@ -235,8 +255,10 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
   /**
    * The single configuration source for every consumer: per-field merge of
    * `db -> provider options -> plugin options`, plus the row version that
-   * callers use to decide whether their cached client/engine is still valid.
-   * Never throws.
+   * callers use to decide whether their cached client/engine is still valid,
+   * and the credential↔environment mismatch detected from this layer's
+   * `credentialEnvironment` declaration (null when there is none). Callers
+   * decide whether a mismatch is fatal - this method never throws.
    */
   async getResolvedPaypalConfig(
     layers: { providerOptions?: Record<string, unknown> | null } = {}
@@ -244,6 +266,7 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
     config: PaypalResolvedConfig;
     version: number;
     sources: Record<PaypalConfigField, PaypalConfigSource>;
+    credentialEnvironmentMismatch: PaypalCredentialEnvironmentMismatch | null;
     meta: {
       lastModifiedBy: string | null;
       lastModifiedAt: string | null;
@@ -271,6 +294,17 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
       config,
       version: row?.version ?? 0,
       sources,
+      // The plugin-options credential set is the only one this service owns,
+      // so its declaration is the one evaluated here; the payment provider
+      // evaluates its own options' declaration against the same sources.
+      credentialEnvironmentMismatch: detectDeclaredCredentialEnvironmentMismatch(
+        {
+          declaredEnvironment: this.pluginOptions.credentialEnvironment,
+          declaredLayer: "plugin_options",
+          sources,
+          resolvedIsSandbox: config.isSandbox,
+        },
+      ),
       meta: {
         lastModifiedBy: row?.last_modified_by ?? null,
         lastModifiedAt: toIsoString(row?.last_modified_at),
@@ -544,7 +578,8 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
    * client.
    */
   protected async getVaultClient(): Promise<PaypalService> {
-    const { config } = await this.getResolvedPaypalConfig();
+    const { config, credentialEnvironmentMismatch } =
+      await this.getResolvedPaypalConfig();
 
     try {
       assertPaypalConfigured(config);
@@ -554,6 +589,11 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
       // preserves INVALID_DATA and would render it as a 400 customer refusal.
       throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, errorMessage(error));
     }
+
+    // Bind-time refusal for a credential set declared for the wrong
+    // environment (#18): the bind fails with the typed mismatch error instead
+    // of minting a vault id the wrong environment can never charge.
+    assertNoCredentialEnvironmentMismatch(credentialEnvironmentMismatch);
 
     return new PaypalService(config);
   }

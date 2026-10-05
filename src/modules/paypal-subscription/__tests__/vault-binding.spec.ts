@@ -4,7 +4,10 @@ import PaypalSubscriptionModuleService, {
 } from "../service";
 import type { PaypalService } from "../../../providers/paypal/paypal-core/paypal-core";
 import { PAYPAL_VAULT_BINDING_CAPABILITY } from "../../../index";
-import { PAYPAL_VAULT_BINDING_CAPABILITY as MODULE_CAPABILITY } from "../../../vault";
+import {
+  ApprovalAlreadyUsedError,
+  PAYPAL_VAULT_BINDING_CAPABILITY as MODULE_CAPABILITY,
+} from "../../../vault";
 
 type Container = ConstructorParameters<typeof PaypalSubscriptionModuleService>[0];
 
@@ -164,6 +167,23 @@ describe("PaypalSubscriptionModuleService vault binding", () => {
     await expect(service.startVaultApproval(input)).rejects.toBe(failure);
   });
 
+  it("propagates an already-used approval as the typed error the consumer maps idempotently", async () => {
+    const { service } = makeService();
+    const { client, stub } = makeClient();
+    const alreadyUsed = new ApprovalAlreadyUsedError();
+
+    stub.getVaultSetupToken.mockResolvedValue({
+      setup_token_id: "st_1",
+      status: "VAULTED",
+    });
+    stub.createVaultPaymentToken.mockRejectedValue(alreadyUsed);
+    overrideVaultClient(service, client);
+
+    await expect(
+      service.completeVaultApproval({ setup_token_id: "st_1" })
+    ).rejects.toBe(alreadyUsed);
+  });
+
   it("resolves the client through the module's own config resolver", async () => {
     const { service, crud } = makeService();
     crud.listPaypalSettings.mockResolvedValue([
@@ -276,5 +296,87 @@ describe("PaypalSubscriptionModuleService vault client environment", () => {
     await vaultClientOf(service);
 
     expect(environmentWarnings(service)).toHaveLength(1);
+  });
+});
+
+describe("PaypalSubscriptionModuleService credential environment guard (#18)", () => {
+  it("refuses the bind at runtime when the credential set is declared for the other environment", async () => {
+    // Sandbox-credential file wired into a host that resolves to live: the
+    // bind must fail with the typed mismatch error instead of minting a
+    // vault id the live API can never charge.
+    const { service } = makeService({
+      clientId: "sandbox-client-id",
+      clientSecret: "sandbox-client-secret",
+      isSandbox: false,
+      credentialEnvironment: "sandbox",
+    });
+
+    await expect(
+      service.startVaultApproval({
+        customer_id: "cus_1",
+        return_url: "https://shop.test/return",
+        cancel_url: "https://shop.test/cancel",
+      })
+    ).rejects.toMatchObject({
+      name: "PaypalCredentialEnvironmentMismatchError",
+      type: MedusaError.Types.UNEXPECTED_STATE,
+      message: expect.stringContaining("mismatch"),
+    });
+  });
+
+  it("refuses the charging engine for the same mismatch", async () => {
+    const { service } = makeService({
+      clientId: "sandbox-client-id",
+      clientSecret: "sandbox-client-secret",
+      isSandbox: false,
+      credentialEnvironment: "sandbox",
+    });
+
+    await expect((service as any).resolveEngine()).rejects.toMatchObject({
+      name: "PaypalCredentialEnvironmentMismatchError",
+    });
+  });
+
+  it("builds the vault client when the declaration agrees with the environment", async () => {
+    const { service } = makeService({
+      clientId: "sandbox-client-id",
+      clientSecret: "sandbox-client-secret",
+      isSandbox: true,
+      credentialEnvironment: "sandbox",
+    });
+
+    await expect(
+      (
+        service as unknown as {
+          getVaultClient: () => Promise<{ environment: string }>;
+        }
+      ).getVaultClient()
+    ).resolves.toMatchObject({ environment: "sandbox" });
+  });
+
+  it("leaves the declaration inert when the db row supplies the credentials", async () => {
+    // The declaration describes the plugin-options credential set; a db row
+    // overriding the credentials is the admin's own coherent set, verified
+    // against the live API by the admin settings action - not by this guard.
+    const { service, crud } = makeService({
+      isSandbox: false,
+      credentialEnvironment: "live",
+    });
+    crud.listPaypalSettings.mockResolvedValue([
+      {
+        id: "ppset_singleton",
+        client_id: "db-id",
+        client_secret: "db-secret",
+        is_sandbox: true,
+      },
+    ]);
+
+    await expect(
+      (
+        service as unknown as {
+          getVaultClient: () => Promise<{ environment: string }>;
+        }
+      ).getVaultClient()
+    ).resolves.toMatchObject({ environment: "sandbox" });
   });
 });

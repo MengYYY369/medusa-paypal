@@ -1,9 +1,12 @@
 import { MedusaError } from "@medusajs/framework/utils";
 import PaypalSubscriptionModuleService from "../service";
 import {
+  assertNoCredentialEnvironmentMismatch,
   assertPaypalConfigured,
+  detectDeclaredCredentialEnvironmentMismatch,
   maskSecret,
   mergePaypalConfigLayers,
+  PaypalCredentialEnvironmentMismatchError,
 } from "../lib/config-resolver";
 import {
   PaypalSubscriptionConfig,
@@ -181,6 +184,98 @@ describe("maskSecret", () => {
     expect(maskSecret("super-secret-1234")).toBe("••••1234");
     expect(maskSecret("abcd")).toBe("••••abcd");
     expect(maskSecret("abc")).toBe("••••abc");
+  });
+});
+
+describe("credential environment declaration guard (#18)", () => {
+  const sourcesOf = (clientId: string, isSandbox: string) =>
+    ({ clientId, isSandbox }) as Parameters<
+      typeof detectDeclaredCredentialEnvironmentMismatch
+    >[0]["sources"];
+
+  it("fires when the declared credential set is the active one and the environments contradict", () => {
+    const mismatch = detectDeclaredCredentialEnvironmentMismatch({
+      declaredEnvironment: "sandbox",
+      declaredLayer: "plugin_options",
+      sources: sourcesOf("plugin_options", "provider_options"),
+      resolvedIsSandbox: false,
+    });
+
+    expect(mismatch).toEqual({
+      credentialsSource: "plugin_options",
+      declaredEnvironment: "sandbox",
+      environmentSource: "provider_options",
+      resolvedEnvironment: "live",
+    });
+  });
+
+  it("is inert when the active credentials come from another layer", () => {
+    // A db row overriding the credentials makes the declaration stale, not
+    // wrong: there is no local proof of a contradiction, so the guard must
+    // not fire (the row's own coherence is what the admin verify action
+    // probes).
+    expect(
+      detectDeclaredCredentialEnvironmentMismatch({
+        declaredEnvironment: "sandbox",
+        declaredLayer: "plugin_options",
+        sources: sourcesOf("db", "provider_options"),
+        resolvedIsSandbox: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("is inert without a declaration", () => {
+    expect(
+      detectDeclaredCredentialEnvironmentMismatch({
+        declaredEnvironment: undefined,
+        declaredLayer: "plugin_options",
+        sources: sourcesOf("plugin_options", "plugin_options"),
+        resolvedIsSandbox: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("passes when the declaration agrees with the resolved environment", () => {
+    expect(
+      detectDeclaredCredentialEnvironmentMismatch({
+        declaredEnvironment: "live",
+        declaredLayer: "provider_options",
+        sources: sourcesOf("provider_options", "db"),
+        resolvedIsSandbox: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("assertNoCredentialEnvironmentMismatch throws the typed mismatch error", () => {
+    const mismatch = detectDeclaredCredentialEnvironmentMismatch({
+      declaredEnvironment: "live",
+      declaredLayer: "self",
+      sources: { clientId: "self", isSandbox: "self" },
+      resolvedIsSandbox: true,
+    });
+
+    expect(() =>
+      assertNoCredentialEnvironmentMismatch(mismatch)
+    ).toThrow(PaypalCredentialEnvironmentMismatchError);
+
+    try {
+      assertNoCredentialEnvironmentMismatch(mismatch);
+      throw new Error("expected the assertion to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MedusaError);
+      expect(error).toMatchObject({
+        name: "PaypalCredentialEnvironmentMismatchError",
+        type: MedusaError.Types.UNEXPECTED_STATE,
+        message: expect.stringContaining("sandbox"),
+      });
+    }
+  });
+
+  it("assertNoCredentialEnvironmentMismatch accepts absent and null mismatches", () => {
+    expect(() => assertNoCredentialEnvironmentMismatch(null)).not.toThrow();
+    expect(() =>
+      assertNoCredentialEnvironmentMismatch(undefined)
+    ).not.toThrow();
   });
 });
 

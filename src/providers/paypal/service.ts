@@ -43,8 +43,14 @@ import {
 } from "../../subscription/engine";
 import { isSubscriptionEvent } from "../../subscription/engine";
 import {
+  assertNoCredentialEnvironmentMismatch,
   assertPaypalConfigured,
+  detectDeclaredCredentialEnvironmentMismatch,
   mergePaypalConfigLayers,
+  PaypalConfigField,
+  PaypalConfigSource,
+  PaypalCredentialEnvironmentMismatch,
+  PaypalEnvironment,
   PaypalResolvedConfig,
 } from "../../modules/paypal-subscription/lib/config-resolver";
 import { z } from "zod";
@@ -144,6 +150,14 @@ const optionsSchema = z.object({
     ),
   clientSecret: z.string().optional(),
   isSandbox: z.boolean().default(false),
+  /**
+   * The environment the option-layer credential set belongs to. Declared by
+   * hosts that keep per-environment credential files: while these options are
+   * the layer supplying the active credentials, a contradiction with
+   * `isSandbox` refuses to boot (validateOptions) and refuses every PayPal
+   * call at runtime (#18) instead of hitting the wrong environment's API.
+   */
+  credentialEnvironment: z.enum(["sandbox", "live"]).optional(),
   webhookId: z.string().optional(),
   /**
    * Webhook ID of the second (subscription) webhook. Falls back to
@@ -178,6 +192,14 @@ export type PaypalPluginOptions = {
    * Default: false
    */
   isSandbox?: boolean;
+
+  /**
+   * The environment this option layer's credential set belongs to. Declared
+   * by hosts that keep per-environment credential files: while these options
+   * are the layer supplying the active credentials, a contradiction with
+   * `isSandbox` refuses to boot and refuses every PayPal call at runtime.
+   */
+  credentialEnvironment?: PaypalEnvironment;
 
   /**
    * PayPal webhook ID to validate incoming webhooks.
@@ -340,6 +362,9 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
    */
   private async resolveRuntimeConfig(): Promise<{
     config: PaypalResolvedConfig;
+    sources: Record<PaypalConfigField, PaypalConfigSource>;
+    /** Mismatch of the module's own plugin-options declaration, when the module is registered. */
+    moduleCredentialEnvironmentMismatch?: PaypalCredentialEnvironmentMismatch | null;
     key: string;
   }> {
     const subscriptionModule = resolveOptionalCradleDependency(
@@ -351,19 +376,28 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       subscriptionModule &&
       typeof subscriptionModule.getResolvedPaypalConfig === "function"
     ) {
-      const { config, version } =
-        await subscriptionModule.getResolvedPaypalConfig({
-          providerOptions: this.options,
-        });
+      const {
+        config,
+        version,
+        sources,
+        credentialEnvironmentMismatch,
+      } = await subscriptionModule.getResolvedPaypalConfig({
+        providerOptions: this.options,
+      });
 
-      return { config, key: `${version}:${JSON.stringify(config)}` };
+      return {
+        config,
+        sources,
+        moduleCredentialEnvironmentMismatch: credentialEnvironmentMismatch,
+        key: `${version}:${JSON.stringify(config)}`,
+      };
     }
 
-    const { config } = mergePaypalConfigLayers({
+    const { config, sources } = mergePaypalConfigLayers({
       providerOptions: this.options,
     });
 
-    return { config, key: `0:${JSON.stringify(config)}` };
+    return { config, sources, key: `0:${JSON.stringify(config)}` };
   }
 
   private async resolveClient(): Promise<{
@@ -374,6 +408,24 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
     const resolved = await this.resolveRuntimeConfig();
 
     assertPaypalConfigured(resolved.config);
+
+    // #18 credential-environment guard: refuse to call PayPal with a
+    // credential set declared for the other environment - both the module's
+    // plugin-options declaration and this provider's own options declaration,
+    // each meaningful while its layer supplies the active credentials. This
+    // is the path that turned R11's sandbox-credentials-on-live delete into
+    // an idempotent-looking 404.
+    assertNoCredentialEnvironmentMismatch(
+      resolved.moduleCredentialEnvironmentMismatch
+    );
+    assertNoCredentialEnvironmentMismatch(
+      detectDeclaredCredentialEnvironmentMismatch({
+        declaredEnvironment: this.options.credentialEnvironment,
+        declaredLayer: "provider_options",
+        sources: resolved.sources,
+        resolvedIsSandbox: resolved.config.isSandbox,
+      })
+    );
 
     if (this.clientCache?.key === resolved.key) {
       return {
@@ -483,6 +535,19 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
         `Invalid PayPal plugin options: ${hasClientId ? "clientSecret" : "clientId"} is missing while the other credential is set. Provide both credentials or neither.`
       );
     }
+
+    // #18 boot-time guard: an option layer that ships a credential pair must
+    // declare it for the same environment it points isSandbox at. A
+    // contradiction here is a hosting error that would otherwise surface as
+    // confusing 401s (or R11's silent 404 deletes) on the wrong API.
+    assertNoCredentialEnvironmentMismatch(
+      detectDeclaredCredentialEnvironmentMismatch({
+        declaredEnvironment: result.data.credentialEnvironment,
+        declaredLayer: "self",
+        sources: { clientId: "self", isSandbox: "self" },
+        resolvedIsSandbox: result.data.isSandbox,
+      })
+    );
   }
 
   async capturePayment(
