@@ -48,7 +48,7 @@ type MockVaultController = {
   getSetupToken: jest.Mock<Promise<unknown>, [string]>;
   createPaymentToken: jest.Mock<
     Promise<unknown>,
-    [{ body: VaultPaymentTokenBody }]
+    [{ body: VaultPaymentTokenBody; paypalRequestId?: string }]
   >;
   listCustomerPaymentTokens: jest.Mock<
     Promise<unknown>,
