@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.9.5 — 2026-10-05
+
+### Fixed
+
+- **D1: a bind's reference is never resolved by listing.** `complete` hands
+  back the vault id PayPal's create-payment-token response minted, and the
+  binder contract now states that this id is authoritative the moment the
+  exchange returns: callers must not verify it by listing vault payment
+  methods afterwards. PayPal v3's create-then-list read-after-write latency
+  drops freshly minted tokens from the list, which turned successful binds
+  into 409 `bindingNotVerified` (2026-10-05 test plan, defect D1). Locked by
+  a test asserting the list API is never invoked on the complete path.
+
+### Added
+
+- **Already-used approvals are a typed error.** When PayPal rejects the
+  exchange because the approval session was already consumed, the failure now
+  surfaces as `ApprovalAlreadyUsedError` (re-exported from
+  `@mengyyy369/medusa-paypal/binder`) instead of a generic vault failure, so
+  `medusa-payment-methods` can map it to an idempotent success with the
+  method the first complete created. The error keeps type `unexpected_state`
+  - an uncaught one is a loud 500, never a fabricated 400 - and its message
+  never echoes the setup token id.
+- **Duplicate completes replay instead of minting.** The vault exchange now
+  carries a deterministic `PayPal-Request-Id` keyed by the setup token id, so
+  a repeated complete of the same approval session returns the original vault
+  id within PayPal's request-id window instead of creating a second
+  same-provider token.
+
+### Changed
+
+- **The sandbox guard extends to the credential set itself (#18, walkthrough
+  R11).** Credential sets can declare the environment they belong to via
+  `credentialEnvironment: "sandbox" | "live"` on the binder options, the
+  payment provider options and the plugin options. While a declared layer is
+  the one supplying the active credentials, a contradiction with `is_sandbox`
+  fails fast: the binder factory throws
+  `PaypalCredentialEnvironmentMismatchError` at startup, the provider refuses
+  to boot (`validateOptions`) and refuses every runtime call, and the
+  subscription module's vault binding and charging engine refuse with the
+  same typed error. Without a declaration nothing is checked - there is
+  nothing local to compare - and a database row that overrides the
+  credentials leaves the declaration inert; the admin settings "verify"
+  action remains the probe against the live API.
+
+### Tests
+
+- 20 new jest cases (219 → 239): complete returns the created vault id with
+  the list API asserted uninvoked, already-used mappings at the PayPal client
+  and binder levels, the deterministic request id, and credential↔environment
+  mismatch fail-fast at binder startup plus the module's bind/engine refusal
+  points.
+
 ## 0.9.4 — 2026-10-04
 
 - The exported binder now declares `kind: "paypal"` (2026-10-04 production
