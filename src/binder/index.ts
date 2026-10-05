@@ -19,19 +19,40 @@
  *         clientId: process.env.PAYPAL_CLIENT_ID,
  *         clientSecret: process.env.PAYPAL_CLIENT_SECRET,
  *         isSandbox: process.env.PAYPAL_IS_SANDBOX === "true",
+ *         // Optional credential-environment declaration (#18): hosts that
+ *         // keep per-environment credential files can declare which one this
+ *         // set belongs to; a contradiction with isSandbox throws at startup.
+ *         credentialEnvironment: process.env.PAYPAL_IS_SANDBOX === "true"
+ *           ? "sandbox"
+ *           : "live",
  *       }),
  *     }
  */
 
 import { MedusaError } from "@medusajs/framework/utils";
 import { PaypalService } from "../providers/paypal/paypal-core/paypal-core";
+import {
+  assertNoCredentialEnvironmentMismatch,
+  detectDeclaredCredentialEnvironmentMismatch,
+  PaypalEnvironment,
+} from "../modules/paypal-subscription/lib/config-resolver";
 import { completeVaultApproval, startVaultApproval } from "../vault";
+
+export { ApprovalAlreadyUsedError } from "../vault";
 
 /** PayPal credentials the binder needs; the same source as the provider options. */
 export type PaypalBinderOptions = {
   clientId: string;
   clientSecret: string;
   isSandbox: boolean;
+  /**
+   * The environment this credential set belongs to, declared by hosts that
+   * keep per-environment credential files. When it contradicts `isSandbox`
+   * the factory throws at startup (#18) instead of binding wallet in one
+   * environment while the host charges in the other. Without a declaration
+   * there is nothing local to compare, so the factory accepts the options.
+   */
+  credentialEnvironment?: PaypalEnvironment;
 };
 
 export type PaymentMethodBinderStartInput = {
@@ -55,7 +76,24 @@ export type PaymentMethodBinderCompleteInput = {
 };
 
 export type PaymentMethodBinderCompleteResult = {
-  /** The vaulted payment-token id the plugin stores as the method reference. */
+  /**
+   * The vaulted payment-token id the plugin stores as the method reference,
+   * taken verbatim from PayPal's create-payment-token response. It is
+   * authoritative the moment `complete` resolves: do NOT resolve or verify it
+   * by listing vault payment methods afterwards - PayPal v3's
+   * create-then-list read-after-write latency drops freshly minted tokens
+   * from the list, which surfaces as a 409 `bindingNotVerified` on a bind
+   * that actually succeeded (defect D1).
+   *
+   * Duplicate contract: completing the same approval session again never
+   * mints a second vault id (the exchange carries a deterministic
+   * PayPal-Request-Id, so PayPal replays the original response), and a
+   * session PayPal rejects as already used surfaces as
+   * `ApprovalAlreadyUsedError`, which callers map to an idempotent success
+   * with the method the first complete created. Ownership re-checks and
+   * complete idempotency keyed by the approval session (the `state` the
+   * caller generated) live on the caller side.
+   */
   paymentMethodId: string;
   data: Record<string, unknown>;
 };
@@ -76,10 +114,27 @@ export type PaymentMethodBinder = {
  * PayPal client is created lazily on first use and reused; the vault flow it
  * drives creates a setup token, returns the approval URL, then exchanges the
  * approved token for the permanent vault id.
+ *
+ * Startup guard (#18): when `credentialEnvironment` is declared and
+ * contradicts `isSandbox`, the factory throws immediately - a misconfigured
+ * host fails at boot instead of binding wallets through the wrong
+ * environment's API.
  */
 export function createPaypalBinder(
   options: PaypalBinderOptions,
 ): PaymentMethodBinder {
+  // The credential set's own environment vs the environment the client would
+  // run against. Both come from this one options object, so this is the
+  // fail-fast point for every bind this binder will ever serve.
+  assertNoCredentialEnvironmentMismatch(
+    detectDeclaredCredentialEnvironmentMismatch({
+      declaredEnvironment: options.credentialEnvironment,
+      declaredLayer: "self",
+      sources: { clientId: "self", isSandbox: "self" },
+      resolvedIsSandbox: options.isSandbox,
+    })
+  );
+
   let client: PaypalService | undefined;
 
   const getClient = (): PaypalService => {

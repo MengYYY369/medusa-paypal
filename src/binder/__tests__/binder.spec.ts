@@ -1,6 +1,6 @@
 import { MedusaError } from "@medusajs/framework/utils";
 import { PaypalService } from "../../providers/paypal/paypal-core/paypal-core";
-import { createPaypalBinder } from "../index";
+import { ApprovalAlreadyUsedError, createPaypalBinder } from "../index";
 
 /**
  * The binder builds its own PayPal client, so the vault calls are spied at the
@@ -84,12 +84,39 @@ describe("createPaypalBinder complete", () => {
     const exchange = jest
       .spyOn(PaypalService.prototype, "createVaultPaymentToken")
       .mockResolvedValue({ vault_id: "vault_1" });
+    // Defect D1 regression lock: the reference is the vault id the exchange
+    // returned, never one re-resolved by listing vault payment methods
+    // (PayPal v3 read-after-write latency makes that list 409
+    // bindingNotVerified right after a successful bind).
+    const list = jest.spyOn(
+      PaypalService.prototype,
+      "listVaultedPaymentMethods",
+    );
 
     await expect(makeBinder().complete(completeInput)).resolves.toEqual({
       paymentMethodId: "vault_1",
       data: { type: "paypal" },
     });
     expect(exchange).toHaveBeenCalledWith("st_1");
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("surfaces an already-used approval session as ApprovalAlreadyUsedError", async () => {
+    jest
+      .spyOn(PaypalService.prototype, "getVaultSetupToken")
+      .mockResolvedValue({ setup_token_id: "st_1", status: "VAULTED" });
+
+    const alreadyUsed = new ApprovalAlreadyUsedError();
+
+    jest
+      .spyOn(PaypalService.prototype, "createVaultPaymentToken")
+      .mockRejectedValue(alreadyUsed);
+
+    // The caller maps this by identity to an idempotent success with the
+    // method the first complete created - it must arrive unharmed.
+    await expect(makeBinder().complete(completeInput)).rejects.toBe(
+      alreadyUsed,
+    );
   });
 
   it("refuses a setup token the payer has not approved", async () => {
@@ -128,5 +155,51 @@ describe("createPaypalBinder contract", () => {
 
     expect(typeof binder.start).toBe("function");
     expect(typeof binder.complete).toBe("function");
+  });
+});
+
+describe("createPaypalBinder credential environment guard", () => {
+  // Walkthrough R11 / #18: sandbox credentials must never run against the
+  // live API and vice versa. The factory is the fail-fast point - a host
+  // that declares which environment its credential set belongs to gets a
+  // boot-time throw instead of binds against the wrong API.
+  it("throws at startup when the declared credential environment contradicts isSandbox", () => {
+    expect(() =>
+      createPaypalBinder({
+        clientId: "sandbox-client-id",
+        clientSecret: "sandbox-client-secret",
+        isSandbox: true,
+        credentialEnvironment: "live",
+      }),
+    ).toThrow(expect.objectContaining({
+      name: "PaypalCredentialEnvironmentMismatchError",
+      message: expect.stringContaining("mismatch"),
+    }));
+  });
+
+  it("refuses the mirror case: live credentials declared against a sandbox client", () => {
+    expect(() =>
+      createPaypalBinder({
+        clientId: "live-client-id",
+        clientSecret: "live-client-secret",
+        isSandbox: false,
+        credentialEnvironment: "sandbox",
+      }),
+    ).toThrow("PayPal credential environment mismatch");
+  });
+
+  it("accepts a declaration that agrees with isSandbox", () => {
+    expect(() =>
+      createPaypalBinder({
+        clientId: "test-client-id",
+        clientSecret: "test-client-secret",
+        isSandbox: true,
+        credentialEnvironment: "sandbox",
+      }),
+    ).not.toThrow();
+  });
+
+  it("accepts options without a declaration (nothing local to compare)", () => {
+    expect(() => makeBinder()).not.toThrow();
   });
 });
