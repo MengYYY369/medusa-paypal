@@ -19,6 +19,8 @@
 
 import type { PaypalService } from "../providers/paypal/paypal-core/paypal-core";
 
+export { ApprovalAlreadyUsedError } from "../providers/paypal/paypal-core/paypal-core";
+
 /**
  * Capability name exposed to consumers that detect this feature by
  * duck-typing the resolved service (`typeof svc.startVaultApproval ===
@@ -64,6 +66,29 @@ export async function startVaultApproval(
   return { setup_token_id: created.setup_token_id, approve_url: created.approve_url };
 }
 
+/**
+ * Completes a vault approval by exchanging the approved setup token for the
+ * permanent payment token.
+ *
+ * The contract for callers (the binder, and through it the
+ * `medusa-payment-methods` plugin):
+ *
+ * - The reference is `vault_id`, taken verbatim from the create-payment-token
+ *   response. It is authoritative the moment the exchange returns. Callers
+ *   must never resolve or verify it by listing vault payment methods
+ *   afterwards: PayPal v3's create-then-list read-after-write latency drops
+ *   freshly minted tokens from the list, which used to surface as a 409
+ *   `bindingNotVerified` on a bind that had actually succeeded (defect D1).
+ * - A duplicated `complete` of the same approval session does not mint a
+ *   second vault id: the exchange carries a deterministic PayPal-Request-Id,
+ *   so the duplicate replays the original response within PayPal's request-id
+ *   window.
+ * - If PayPal rejects the exchange because the approval session was already
+ *   used, the failure is `ApprovalAlreadyUsedError` - callers map it to an
+ *   idempotent success with the method the first complete created.
+ * - A setup token the payer has not approved (or whose approval expired)
+ *   resolves with `status` only and no `vault_id`; the caller refuses.
+ */
 export async function completeVaultApproval(
   client: PaypalService,
   input: CompleteVaultApprovalInput,

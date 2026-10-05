@@ -174,6 +174,52 @@ type PaypalErrorBody = {
 };
 
 /**
+ * Thrown when PayPal refuses to exchange a setup token because its approval
+ * session has already been used - the signature of a duplicated `complete`.
+ *
+ * This is contract, not diagnostics: the `medusa-payment-methods` plugin
+ * catches it by name and answers an idempotent success with the method the
+ * first complete created. It deliberately carries type UNEXPECTED_STATE (a
+ * 500), so a caller that does not know the contract fails loudly instead of
+ * rendering a fabricated customer refusal.
+ *
+ * The message never echoes the setup token id: PayPal error descriptions
+ * embed ids, and this text reaches logs and API responses.
+ */
+export class ApprovalAlreadyUsedError extends MedusaError {
+  constructor() {
+    super(
+      MedusaError.Types.UNEXPECTED_STATE,
+      "PayPal approval session was already used; the setup token cannot be exchanged again",
+    );
+
+    this.name = "ApprovalAlreadyUsedError";
+  }
+}
+
+/**
+ * PayPal does not publish a stable issue code for exchanging a setup token
+ * whose approval session was already consumed. These are the codes documented
+ * and observed for it; the set is the extension point when sandbox or
+ * production surfaces a new one. Matched case-insensitively against the
+ * extracted issue/name code of a 400/422 exchange rejection.
+ */
+const SETUP_TOKEN_ALREADY_USED_CODES = new Set([
+  "SETUP_TOKEN_ALREADY_USED",
+  "SETUP_TOKEN_ALREADY_CONSUMED",
+]);
+
+function isApprovalAlreadyUsedError(error: unknown): boolean {
+  const { status, code } = extractPaypalErrorCode(error);
+
+  return (
+    (status === 400 || status === 422) &&
+    typeof code === "string" &&
+    SETUP_TOKEN_ALREADY_USED_CODES.has(code.toUpperCase())
+  );
+}
+
+/**
  * Pulls the HTTP status and the PayPal issue/name code out of an SDK error.
  * Mirrors extractPaypalDecline in service.ts (`error.result ?? error.body`,
  * string bodies parsed as JSON) but deliberately drops the
@@ -633,12 +679,25 @@ export class PaypalService {
    * Exchanges an approved setup token for a permanent Vault v3 payment token.
    * The returned id is the payment-method reference the subscription engine
    * stores and later charges off-session.
+   *
+   * The exchange carries a deterministic `PayPal-Request-Id` keyed by the
+   * setup token id, so a duplicated `complete` of the same approval session
+   * replays the original response (same vault id) instead of minting a second
+   * token - PayPal stores request ids for 3 hours. The prefix namespaces the
+   * id to this one call site; setup token ids are ~16 characters, so the
+   * header stays inside PayPal's 38-character request-id budget.
+   *
+   * A rejection caused by an already-consumed approval session surfaces as
+   * `ApprovalAlreadyUsedError` (contract for the idempotent-retry mapping),
+   * everything else as the sanitized UNEXPECTED_STATE vault failure.
    */
   async createVaultPaymentToken(
     setupTokenId: string,
   ): Promise<PaypalVaultPaymentToken> {
-    const response = await callVaultApi("create payment token", () =>
-      this.vaultController.createPaymentToken({
+    let response: Awaited<ReturnType<VaultController["createPaymentToken"]>>;
+
+    try {
+      response = await this.vaultController.createPaymentToken({
         body: {
           paymentSource: {
             token: {
@@ -647,8 +706,15 @@ export class PaypalService {
             },
           },
         },
-      }),
-    );
+        paypalRequestId: `vault-exchange-${setupTokenId}`,
+      });
+    } catch (error) {
+      if (isApprovalAlreadyUsedError(error)) {
+        throw new ApprovalAlreadyUsedError();
+      }
+
+      throw toVaultFailure("create payment token", error);
+    }
 
     const vaultId = response.result.id;
 

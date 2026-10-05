@@ -1,6 +1,10 @@
 import { MedusaError } from "@medusajs/framework/utils";
 import { OrdersController } from "@paypal/paypal-server-sdk";
-import { derivePaypalCustomerId, PaypalService } from "../paypal-core";
+import {
+  ApprovalAlreadyUsedError,
+  derivePaypalCustomerId,
+  PaypalService,
+} from "../paypal-core";
 
 /**
  * Vault v3 setup-token / payment-token contract locks over a mocked
@@ -458,8 +462,97 @@ describe("PaypalService.createVaultPaymentToken", () => {
       body: {
         paymentSource: { token: { id: "SETUP-1", type: "SETUP_TOKEN" } },
       },
+      // Deterministic per approval session: PayPal replays the original
+      // response for a duplicated exchange instead of minting a second token
+      // (dedup support for repeated completes of the same approval).
+      paypalRequestId: "vault-exchange-SETUP-1",
     });
     expect(token).toEqual({ vault_id: "VAULT-1" });
+  });
+
+  it("derives the same request id from the same setup token", async () => {
+    const mock = makeMockVaultController();
+    mock.createPaymentToken.mockResolvedValue({
+      result: { id: "VAULT-1" },
+    });
+    const client = makeClient(mock);
+
+    await client.createVaultPaymentToken("SETUP-1");
+    await client.createVaultPaymentToken("SETUP-1");
+
+    const requestIds = mock.createPaymentToken.mock.calls.map(
+      (call) => call[0].paypalRequestId
+    );
+
+    expect(new Set(requestIds)).toEqual(new Set(["vault-exchange-SETUP-1"]));
+  });
+
+  it("maps an already-used approval session to ApprovalAlreadyUsedError", async () => {
+    const mock = makeMockVaultController();
+    mock.createPaymentToken.mockRejectedValue({
+      statusCode: 422,
+      result: {
+        name: "UNPROCESSABLE_ENTITY",
+        details: [
+          {
+            issue: "SETUP_TOKEN_ALREADY_USED",
+            description: "Setup token SETUP-SECRET-123 was already used",
+          },
+        ],
+      },
+    });
+    const client = makeClient(mock);
+
+    const error = await captureRejection(
+      client.createVaultPaymentToken("SETUP-SECRET-123")
+    );
+
+    expect(error).toBeInstanceOf(ApprovalAlreadyUsedError);
+    expect(error.name).toBe("ApprovalAlreadyUsedError");
+    // UNEXPECTED_STATE on purpose: a caller that does not know the contract
+    // must see a loud server fault, not a fabricated 400 customer refusal.
+    expect(error.type).toBe(MedusaError.Types.UNEXPECTED_STATE);
+    expect(error.message).toContain("already used");
+    // The setup token id is a secret: it must not reach the message.
+    expect(error.message).not.toContain("SETUP-SECRET-123");
+    expectNotClassifierPreserved(error.type);
+  });
+
+  it("maps the alias already-consumed code to ApprovalAlreadyUsedError", async () => {
+    const mock = makeMockVaultController();
+    mock.createPaymentToken.mockRejectedValue({
+      statusCode: 400,
+      result: {
+        name: "INVALID_REQUEST",
+        details: [{ issue: "SETUP_TOKEN_ALREADY_CONSUMED" }],
+      },
+    });
+    const client = makeClient(mock);
+
+    const error = await captureRejection(
+      client.createVaultPaymentToken("SETUP-1")
+    );
+
+    expect(error).toBeInstanceOf(ApprovalAlreadyUsedError);
+  });
+
+  it("keeps other 422 rejections as UNEXPECTED_STATE", async () => {
+    const mock = makeMockVaultController();
+    mock.createPaymentToken.mockRejectedValue({
+      statusCode: 422,
+      result: {
+        name: "UNPROCESSABLE_ENTITY",
+        details: [{ issue: "SETUP_TOKEN_ID_NOT_FOUND" }],
+      },
+    });
+    const client = makeClient(mock);
+
+    const error = await captureRejection(
+      client.createVaultPaymentToken("SETUP-1")
+    );
+
+    expect(error).not.toBeInstanceOf(ApprovalAlreadyUsedError);
+    expect(error.type).toBe(MedusaError.Types.UNEXPECTED_STATE);
   });
 
   it("rejects a response without a payment token id as UNEXPECTED_STATE", async () => {
