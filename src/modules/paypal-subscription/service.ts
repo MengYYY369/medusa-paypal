@@ -23,6 +23,7 @@ import {
   PaypalResolvedConfig,
 } from "./lib/config-resolver";
 import { PaypalService } from "../../providers/paypal/paypal-core/paypal-core";
+import type { NativeSubscriptionChangedHook } from "../../rail/types";
 import * as vault from "../../vault";
 import {
   SubscriptionEngine,
@@ -115,6 +116,18 @@ export type PaypalSubscriptionModuleOptions = SubscriptionEngineOptions & {
   credentialEnvironment?: PaypalEnvironment;
   webhookId?: string;
   subscriptionWebhookId?: string;
+  /**
+   * The rail-event sink the host wires from
+   * `@mengyyy369/medusa-payment-methods` (`emitNativeSubscriptionChanged`).
+   *
+   * Declared here — on the **plugin** options — and read by the payment
+   * provider through this module service, because the provider is constructed
+   * from the payment module's own provider options: a second copy there would
+   * be a second source of truth that silently diverges when only one is set.
+   *
+   * Without it the provider logs one warning at boot and publishes nothing.
+   */
+  onNativeSubscriptionChanged?: NativeSubscriptionChangedHook;
 };
 
 /**
@@ -134,6 +147,8 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
   /** Plugin options captured at bootstrap; the last layer of the fallback chain. */
   protected pluginOptions: PaypalSubscriptionModuleOptions;
   private eventBus?: unknown;
+  /** The rail-event sink from the plugin options; see `getNativeSubscriptionChangedHook`. */
+  private nativeSubscriptionChangedHook?: NativeSubscriptionChangedHook;
   private settingsReadFailureWarned = false;
   private environmentSourceWarned = false;
   private engineCache?: { key: string; engine: SubscriptionEngine };
@@ -144,6 +159,31 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
     this.logger = (container.logger ?? console) as Logger;
     this.pluginOptions = options;
     this.eventBus = container["event_bus"];
+    this.nativeSubscriptionChangedHook = options.onNativeSubscriptionChanged;
+
+    if (typeof this.nativeSubscriptionChangedHook !== "function") {
+      // One warning, at boot, from the only always-constructed place. The
+      // provider cannot warn (it would repeat per webhook) and cannot be the
+      // place the host looks for the wiring — the option lives here.
+      this.logger.warn(
+        "[medusa-paypal] No `onNativeSubscriptionChanged` hook is configured, so native subscription changes will not be published. " +
+          "Wire `emitNativeSubscriptionChanged` from @mengyyy369/medusa-payment-methods into this plugin's options."
+      );
+    }
+  }
+
+  /**
+   * The rail-event sink this host injected, or `null`.
+   *
+   * The payment provider reads it from here: the provider is built from the
+   * payment module's provider options, a different option bag from
+   * `plugins[].options`, so this is the one read point for the one wiring
+   * point.
+   */
+  getNativeSubscriptionChangedHook(): NativeSubscriptionChangedHook | null {
+    return typeof this.nativeSubscriptionChangedHook === "function"
+      ? this.nativeSubscriptionChangedHook
+      : null;
   }
 
   /**
@@ -180,6 +220,8 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
       options: {
         autoBillOutstanding: config.autoBillOutstanding,
         paymentFailureThreshold: config.paymentFailureThreshold,
+        onNativeSubscriptionChanged:
+          this.getNativeSubscriptionChangedHook() ?? undefined,
       },
     });
 

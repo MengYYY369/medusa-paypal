@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.10.0 — 2026-10-06
+
+### Breaking
+
+- **`@mengyyy369/medusa-paypal/binder` is gone; the subpath is now
+  `…/rail`.** `createPaypalBinder` → `createPaypalRail`, which returns a
+  **provider descriptor** instead of a bare binder: the binding protocol moves
+  under `binding`, and the descriptor also carries PayPal's native subscription
+  rail, its error mapping and its label. The host's map key changes with it
+  (`binders: { … }` → `providers: { … }`, medusa-payment-methods 0.3.0).
+- **The `paypal.subscription.*` events are deleted.** There is one rail event
+  now — `payment-rail.native_subscription.changed` — and this package does not
+  define it: the host wires `onNativeSubscriptionChanged` (exported by
+  `medusa-payment-methods`) into this plugin's options, and the subscription
+  engine calls it with the complete record of every transition. The name, the
+  payload and the publication live in exactly one package. A host that wires
+  nothing gets one warning at boot and no rail events.
+
+### Added
+
+- **The native rail descriptor** (`rail.native`): `listRecords` (this plugin's
+  own rows as rail-neutral records), `cancel` (by PayPal's own subscription id,
+  answering `skipped` / `cancelled` / `failed` instead of throwing), and
+  `readVariantDeclaration` (a variant's declaration as the admin card's field
+  rows).
+- **`PaypalApprovalPendingError`** and the two binder predicates
+  (`isAlreadyCompleted` / `isPendingApproval`), so the plugin classifies this
+  package's failures without matching class names or message prose. A pending
+  approval becomes a retryable 422; a consumed approval stays an idempotent
+  replay.
+- **`mapError`**: the credential-environment mismatch is claimed as
+  `500 unexpected_state` with its message kept verbatim.
+
+### Changed
+
+- The rail payload's `kind` is `"paypal"` (the cross-repo join key — the row's
+  `provider_id` is only a payment-session echo and is often null), and
+  `transition` (`status` / `payment_succeeded` / `payment_failed`) carries what
+  the deleted event names used to.
+- The canonical payload fixture lives in
+  `medusa-payment-methods/src/contract/`; this repo keeps a copy its tests
+  assert against, so the two halves can no longer drift apart in silence.
+
 ## 0.9.5 — 2026-10-05
 
 ### Fixed

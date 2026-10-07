@@ -21,7 +21,16 @@ export function makeVariant(overrides: Record<string, unknown> = {}) {
 export class FakeSubscriptionModule {
   plans: any[] = [];
   subscriptions: any[] = [];
+  /**
+   * The rail-event sink a test injects, standing in for the host-wired
+   * `onNativeSubscriptionChanged` that the provider reads off this module.
+   */
+  nativeSubscriptionChangedHook: any = null;
   private seq = 0;
+
+  getNativeSubscriptionChangedHook() {
+    return this.nativeSubscriptionChangedHook;
+  }
 
   private nextId(prefix: string) {
     return `${prefix}_${++this.seq}`;
@@ -109,6 +118,25 @@ export function makeEventBus() {
     emitted,
     emit: jest.fn(async (event: any) => {
       emitted.push(event);
+    }),
+  };
+}
+
+/**
+ * The rail-event sink the host injects (`onNativeSubscriptionChanged`, wired
+ * from `medusa-payment-methods`' `emitNativeSubscriptionChanged`).
+ *
+ * It records the payloads the engine hands it — the assertion surface that
+ * replaced the deleted `paypal.subscription.*` names: the engine no longer
+ * knows an event name, so what a test can check is the payload.
+ */
+export function makeRailSink() {
+  const payloads: any[] = [];
+
+  return {
+    payloads,
+    hook: jest.fn(async (_eventBus: unknown, payload: any) => {
+      payloads.push(payload);
     }),
   };
 }

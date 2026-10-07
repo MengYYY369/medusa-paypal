@@ -13,12 +13,16 @@ import {
   PaypalSubscriptionDeclaration,
 } from "./metadata";
 import {
-  emitSubscriptionEvent,
-  PaypalSubscriptionEvents,
-} from "./events";
+  toNativeSubscriptionChangedPayload,
+  toRailStatus,
+} from "../rail/records";
+import type {
+  NativeSubscriptionChangedHook,
+  NativeSubscriptionTransition,
+  RailStatus,
+} from "../rail/types";
 import {
   PaypalSubscriptionStatus,
-  SubscriptionEventPayload,
   SubscriptionRefundRecord,
   SubscriptionSaleRecord,
 } from "./types";
@@ -62,6 +66,16 @@ export type SubscriptionEngineModules = {
 export type SubscriptionEngineOptions = {
   autoBillOutstanding?: boolean;
   paymentFailureThreshold?: number;
+  /**
+   * The rail-event sink the host injects (`onNativeSubscriptionChanged` in
+   * this plugin's options). The engine hands it the complete record of every
+   * transition; it knows no event name, because the name, the payload shape
+   * and the publication all belong to `medusa-payment-methods`.
+   *
+   * Absent in a host that did not wire it: the transitions then publish
+   * nothing, which the module service warns about once at boot.
+   */
+  onNativeSubscriptionChanged?: NativeSubscriptionChangedHook;
 };
 
 export type SubscriptionEngineDeps = SubscriptionEngineModules & {
@@ -749,16 +763,12 @@ export class SubscriptionEngine {
     }
 
     if (row.status === "SUSPENDED") {
-      await this.transitionRow(row, "ACTIVE", PaypalSubscriptionEvents.RESUMED);
+      await this.transitionRow(row, "ACTIVE", "status");
       return;
     }
 
     if (row.status !== "ACTIVE") {
-      await this.transitionRow(
-        row,
-        "ACTIVE",
-        PaypalSubscriptionEvents.ACTIVATED
-      );
+      await this.transitionRow(row, "ACTIVE", "status");
     }
   }
 
@@ -779,7 +789,7 @@ export class SubscriptionEngine {
       return;
     }
 
-    await this.transitionRow(row, status, eventForStatus(status));
+    await this.transitionRow(row, status, "status");
   }
 
   private async onSubscriptionPaymentFailed(
@@ -802,18 +812,7 @@ export class SubscriptionEngine {
       failure_count: (row.failure_count ?? 0) + 1,
     });
 
-    await this.emitEvent(PaypalSubscriptionEvents.PAYMENT_FAILED, {
-      subscription_id: row.id,
-      paypal_subscription_id: row.paypal_subscription_id,
-      status: row.status as PaypalSubscriptionStatus,
-      customer_id: row.customer_id,
-      variant_id: row.variant_id,
-      payment: {
-        amount: Number(resource?.amount?.value ?? 0),
-        currency_code: resource?.amount?.currency_code ?? row.currency_code,
-        sale_id: resource?.id ?? "",
-      },
-    });
+    await this.notifyRailChange(row, "payment_failed", "past_due");
   }
 
   /**
@@ -863,14 +862,15 @@ export class SubscriptionEngine {
         ],
       });
 
-      await this.emitEvent(PaypalSubscriptionEvents.PAYMENT_SUCCEEDED, {
-        subscription_id: row.id,
-        paypal_subscription_id: row.paypal_subscription_id,
-        status: row.status as PaypalSubscriptionStatus,
-        customer_id: row.customer_id,
-        variant_id: row.variant_id,
-        payment: { amount, currency_code: currencyCode, sale_id: saleId },
-      });
+      await this.notifyRailChange(
+        row,
+        "payment_succeeded",
+        // A completed charge proves the subscription is live, whatever the row
+        // says (the row is ACTIVE by the time a charge lands; the fallback only
+        // covers a row whose status is not mapped).
+        toRailStatus(row.status) ?? "active",
+        { lastBillingAt: billedAt }
+      );
 
       // The standard captured mechanism marks the session captured and
       // completes the cart (or records the charge against the trial-end
@@ -1003,19 +1003,12 @@ export class SubscriptionEngine {
       ],
     });
 
-    await this.emitEvent(PaypalSubscriptionEvents.PAYMENT_SUCCEEDED, {
-      subscription_id: row.id,
-      paypal_subscription_id: row.paypal_subscription_id,
-      status: row.status as PaypalSubscriptionStatus,
-      customer_id: row.customer_id,
-      variant_id: row.variant_id,
-      payment: {
-        amount: sale.amount,
-        currency_code: sale.currency_code,
-        sale_id: sale.sale_id,
-        order_id: order.id,
-      },
-    });
+    await this.notifyRailChange(
+      row,
+      "payment_succeeded",
+      toRailStatus(row.status) ?? "active",
+      { lastBillingAt: sale.billed_at }
+    );
 
     return { order_id: order.id };
   }
@@ -1400,14 +1393,7 @@ export class SubscriptionEngine {
       }
     }
 
-    const event =
-      action === "cancel"
-        ? PaypalSubscriptionEvents.CANCELLED
-        : action === "suspend"
-          ? PaypalSubscriptionEvents.SUSPENDED
-          : PaypalSubscriptionEvents.RESUMED;
-
-    return (await this.transitionRow(row, targetStatus, event)) as SubscriptionRow;
+    return (await this.transitionRow(row, targetStatus, "status")) as SubscriptionRow;
   }
 
   async customerCancel(
@@ -1425,24 +1411,52 @@ export class SubscriptionEngine {
     return this.requestLifecycleAction(row, "cancel");
   }
 
-  private async emitEvent(
-    name: string,
-    payload: SubscriptionEventPayload
+  /**
+   * Reports one row change to the host's injected hook.
+   *
+   * This is the engine's only publication path, and it holds no event name: the
+   * name, the payload shape and the publication all live in
+   * `medusa-payment-methods`, whose `emitNativeSubscriptionChanged` the host
+   * wires into this plugin's options. A missing hook is a boot warning (logged
+   * once by the module service), and a throwing hook is warned and swallowed —
+   * an event failure must never fail a webhook that already charged someone.
+   */
+  private async notifyRailChange(
+    row: SubscriptionRow,
+    transition: NativeSubscriptionTransition,
+    status: RailStatus | null,
+    overrides: { lastBillingAt?: unknown; nextBillingAt?: unknown } = {}
   ): Promise<void> {
-    if (!this.deps.eventBus?.emit) {
-      this.deps.logger.warn(
-        `No event bus available - dropping subscription event ${name} (${payload.subscription_id})`
-      );
+    const hook: NativeSubscriptionChangedHook | undefined =
+      this.deps.options?.onNativeSubscriptionChanged;
+
+    if (typeof hook !== "function") {
       return;
     }
 
-    await emitSubscriptionEvent(this.deps.eventBus, name, payload);
+    const payload = toNativeSubscriptionChangedPayload({
+      row,
+      status,
+      transition,
+      lastBillingAt: overrides.lastBillingAt,
+      nextBillingAt: overrides.nextBillingAt,
+    });
+
+    try {
+      await hook(this.deps.eventBus, payload);
+    } catch (error) {
+      this.deps.logger.warn(
+        `Rail event for subscription ${row.id} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
   }
 
   private async transitionRow(
     row: SubscriptionRow,
     status: PaypalSubscriptionStatus,
-    eventName?: string
+    transition: NativeSubscriptionTransition | null = null
   ): Promise<SubscriptionRow | void> {
     const previous = row.status;
 
@@ -1457,17 +1471,13 @@ export class SubscriptionEngine {
       })
     );
 
-    if (eventName) {
-      await this.emitEvent(eventName, {
-        subscription_id: row.id,
-        paypal_subscription_id: row.paypal_subscription_id,
-        status,
-        customer_id: row.customer_id,
-        variant_id: row.variant_id,
-      });
+    const next = (updated as SubscriptionRow) ?? { ...row, status };
+
+    if (transition) {
+      await this.notifyRailChange(next, transition, toRailStatus(status));
     }
 
-    return (updated as SubscriptionRow) ?? { ...row, status };
+    return next;
   }
 
   // -------------------------------------------------------------------------
@@ -1513,11 +1523,11 @@ export class SubscriptionEngine {
         paypalStatus !== row.status
       ) {
         if (paypalStatus === "ACTIVE" && row.status === "SUSPENDED") {
-          await this.transitionRow(row, "ACTIVE", PaypalSubscriptionEvents.RESUMED);
+          await this.transitionRow(row, "ACTIVE", "status");
         } else if (paypalStatus === "ACTIVE") {
-          await this.transitionRow(row, "ACTIVE", PaypalSubscriptionEvents.ACTIVATED);
+          await this.transitionRow(row, "ACTIVE", "status");
         } else {
-          await this.transitionRow(row, paypalStatus, eventForStatus(paypalStatus));
+          await this.transitionRow(row, paypalStatus, "status");
         }
         aligned += 1;
       }
@@ -1716,17 +1726,4 @@ export class SubscriptionEngine {
   }
 }
 
-function eventForStatus(status: string): string {
-  switch (status) {
-    case "CANCELLED":
-      return PaypalSubscriptionEvents.CANCELLED;
-    case "EXPIRED":
-      return PaypalSubscriptionEvents.EXPIRED;
-    case "SUSPENDED":
-      return PaypalSubscriptionEvents.SUSPENDED;
-    case "ACTIVE":
-      return PaypalSubscriptionEvents.ACTIVATED;
-    default:
-      return PaypalSubscriptionEvents.ACTIVATED;
-  }
-}
+export default SubscriptionEngine;

@@ -241,24 +241,25 @@ const supported =
 The package root also exports `PAYPAL_VAULT_BINDING_CAPABILITY`
 (`"vault-binding"`) as documentation of what that duck-type means.
 
-#### Binding via the host-configurable binder
+#### The rail descriptor (`medusa-payment-methods`)
 
-For the `medusa-payment-methods` plugin, the same flow is exposed as a
-`PaymentMethodBinder` the host passes in through the plugin's `binders` map.
-Credentials are supplied explicitly — the same values the PayPal provider is
-registered with — so the package reads no environment variables of its own and
-needs no container reference. Import the factory from the `binder` subpath:
+For the `medusa-payment-methods` plugin this package exports one descriptor per
+provider: the vault-approval binding protocol plus PayPal's native subscription
+rail. Credentials are supplied explicitly — the same values the PayPal provider
+is registered with — so the package reads no environment variables of its own.
+Import the factory from the `rail` subpath:
 
 ```ts
-import { createPaypalBinder } from "@mengyyy369/medusa-paypal/binder"
+import { createPaypalRail } from "@mengyyy369/medusa-paypal/rail"
 
 // medusa-config.ts
 {
   resolve: "@mengyyy369/medusa-payment-methods",
   options: {
-    binders: {
+    providers: {
       // The key is the payment module registration key (pp_<identifier>_<id>).
-      pp_paypal_paypal: createPaypalBinder({
+      pp_paypal_paypal: createPaypalRail({
+        providerId: "pp_paypal_paypal",
         clientId: process.env.PAYPAL_CLIENT_ID,
         clientSecret: process.env.PAYPAL_CLIENT_SECRET,
         isSandbox: process.env.PAYPAL_IS_SANDBOX === "true",
@@ -268,11 +269,45 @@ import { createPaypalBinder } from "@mengyyy369/medusa-paypal/binder"
 }
 ```
 
-The returned object implements `{ start, complete }`: `start` creates the setup
-token and returns `{ approvalUrl, state }` (the state is the setup token id),
-and `complete` exchanges the approved token and returns
-`{ paymentMethodId, data }`. `returnUrl` / `cancelUrl` are passed through to
-PayPal unchanged.
+The descriptor carries:
+
+- `binding` — `{ start, complete }` plus the two failure predicates. `start`
+  creates the setup token and returns `{ approvalUrl, state }` (the state is
+  the setup token id); `complete` exchanges the approved token and returns
+  `{ paymentMethodId, data }`. A payer who has not approved yet raises
+  `PaypalApprovalPendingError`, which the plugin answers as a retryable 422; an
+  approval that was already exchanged is recognised by `isAlreadyCompleted` and
+  replayed idempotently instead of minting a second vault token.
+  `returnUrl` / `cancelUrl` pass through to PayPal unchanged.
+- `native` — the native subscription rail: `listRecords` (this plugin's own
+  `paypal_subscription` rows as rail-neutral records), `cancel` (by PayPal's own
+  subscription id, answering a structured outcome instead of throwing) and
+  `readVariantDeclaration` (a variant's `paypal_subscription` metadata as the
+  admin card's field rows).
+- `mapError` — the credential-environment mismatch is claimed as
+  `500 unexpected_state` with its message intact; anything else falls through to
+  the plugin's 502 `provider_error`.
+- `display_name` — `PayPal`.
+
+**The rail event is not this package's.** The host wires
+`onNativeSubscriptionChanged` (from `medusa-payment-methods`) into this plugin's
+own options; the subscription engine calls it with the complete record of every
+transition. The event name, the payload shape and the publication all live in
+the plugin, so exactly one definition of them exists:
+
+```ts
+import { emitNativeSubscriptionChanged } from "@mengyyy369/medusa-payment-methods"
+
+{
+  resolve: "@mengyyy369/medusa-paypal",
+  options: {
+    isSandbox: process.env.PAYPAL_IS_SANDBOX === "true",
+    onNativeSubscriptionChanged: emitNativeSubscriptionChanged,
+  },
+}
+```
+
+Without it the plugin logs one warning at boot and publishes nothing.
 
 ### Deleting a saved payment method
 
@@ -447,8 +482,8 @@ daily reconciliation job backfills anything lost.
 **First-period amount semantics**: the cart total equals the full recurring
 price, but with a trial/setup fee PayPal charges only the setup fee (or `0`)
 up front. The order therefore shows a partial capture until the first regular
-charge; the actually-charged amount and currency ride on the
-`paypal.subscription.*` events.
+charge; the charged amount and currency live on the order's payment record —
+the rail event carries the subscription's state, not money.
 
 ### 5. Renewals, refunds, lifecycle
 
@@ -498,10 +533,15 @@ charge; the actually-charged amount and currency ride on the
 - **Customer self-service** (customer auth):
   - `GET /store/paypal/subscriptions` - own subscriptions
   - `POST /store/paypal/subscriptions/:id/cancel` - cancel own subscription
-- **Events** on the Medusa event bus: `paypal.subscription.activated`,
-  `paypal.subscription.suspended`, `paypal.subscription.resumed`,
-  `paypal.subscription.cancelled`, `paypal.subscription.expired`,
-  `paypal.subscription.payment_succeeded`, `paypal.subscription.payment_failed`.
+- **Rail events**: every subscription transition is published as
+  `payment-rail.native_subscription.changed`, a name this package does **not**
+  define — the host wires `onNativeSubscriptionChanged` from
+  `medusa-payment-methods` into the plugin options (see "The rail descriptor"
+  above) and that plugin owns the name, the payload and the publication. The
+  payload is the complete rail record plus `kind` (`"paypal"`), the row's
+  `provider_id` echo and `transition` (`status` / `payment_succeeded` /
+  `payment_failed`). The `paypal.subscription.*` names this package used to
+  emit are gone as of 0.10.0.
 - **Cancellation semantics** are PayPal's: future charges stop immediately,
   paid periods keep their entitlements until period end.
 - **Reconciliation**: a daily job (cron overridable via

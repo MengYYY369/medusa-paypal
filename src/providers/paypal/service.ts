@@ -42,6 +42,7 @@ import {
   SubscriptionEngineOptions,
 } from "../../subscription/engine";
 import { isSubscriptionEvent } from "../../subscription/engine";
+import type { NativeSubscriptionChangedHook } from "../../rail/types";
 import {
   assertNoCredentialEnvironmentMismatch,
   assertPaypalConfigured,
@@ -485,9 +486,26 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       );
     }
 
+    /**
+     * The subscription module, as this provider sees it: only the rail-event
+     * hook is read from it here (the engine gets the module itself through
+     * `modules["paypalSubscription"]`).
+     */
+    const subscriptionModule = modules["paypalSubscription"] as
+      | { getNativeSubscriptionChangedHook?: () => NativeSubscriptionChangedHook | null }
+      | undefined;
+
     const engineOptions: SubscriptionEngineOptions = {
       autoBillOutstanding: config.autoBillOutstanding,
       paymentFailureThreshold: config.paymentFailureThreshold,
+      // The rail-event sink is read off the subscription module, not from this
+      // provider's own options: the host wires `onNativeSubscriptionChanged`
+      // once, on the plugin entry, and the module is the only party that always
+      // sees it. A module that predates the hook (or a host that wired nothing)
+      // answers `undefined`, and the engine then publishes nothing — the module
+      // already warned about it at boot.
+      onNativeSubscriptionChanged:
+        subscriptionModule?.getNativeSubscriptionChangedHook?.() ?? undefined,
     };
 
     const engine = new SubscriptionEngine({

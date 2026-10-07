@@ -2,7 +2,8 @@ import { MedusaError } from "@medusajs/framework/utils";
 import { SubscriptionEngine } from "../engine";
 import { resetPaypalFractionDigitsCache } from "../../lib/currency-digits";
 import { parseSubscriptionMetadata } from "../metadata";
-import { PaypalSubscriptionEvents } from "../events";
+import { PAYPAL_RAIL_KIND } from "../../rail/records";
+import { nativeSubscriptionChangedPayloads } from "../../rail/__tests__/native-subscription-changed.fixture";
 import {
   FakeSubscriptionModule,
   makeEventBus,
@@ -11,6 +12,7 @@ import {
   makePaymentModule,
   makeProductModule,
   makeQuery,
+  makeRailSink,
   makeRow,
   makeVariant,
   makeWorkflowEngine,
@@ -44,6 +46,7 @@ function makeClient(overrides: Record<string, unknown> = {}) {
 type Harness = {
   module: FakeSubscriptionModule;
   eventBus: ReturnType<typeof makeEventBus>;
+  rail: ReturnType<typeof makeRailSink>;
   client: any;
   productModule: ReturnType<typeof makeProductModule>;
   orderModule: ReturnType<typeof makeOrderModule>;
@@ -61,6 +64,7 @@ function makeHarness(opts: {
 } = {}): Harness {
   const subscriptionModule = new FakeSubscriptionModule();
   const eventBus = makeEventBus();
+  const rail = makeRailSink();
   const client = opts.client ?? makeClient();
   const productModule = makeProductModule(opts.variants ?? [makeVariant()]);
   const firstOrder = "firstOrder" in opts ? opts.firstOrder : makeFirstOrder();
@@ -79,11 +83,15 @@ function makeHarness(opts: {
     paymentModule,
     workflowEngine,
     query,
+    // The host-wired rail sink: the engine publishes every transition through
+    // it and knows no event name of its own.
+    options: { onNativeSubscriptionChanged: rail.hook },
   });
 
   return {
     module: subscriptionModule,
     eventBus,
+    rail,
     client,
     productModule,
     orderModule,
@@ -386,8 +394,8 @@ describe("webhook: BILLING.SUBSCRIPTION.ACTIVATED", () => {
 
     expect(result).toEqual({ action: "not_supported" });
     expect(h.module.subscriptions[0].status).toBe("ACTIVE");
-    expect(h.eventBus.emitted).toEqual([
-      expect.objectContaining({ name: PaypalSubscriptionEvents.ACTIVATED }),
+    expect(h.rail.payloads).toEqual([
+      expect.objectContaining({ status: "active", transition: "status" }),
     ]);
     expect(h.orderModule.createOrders).not.toHaveBeenCalled();
   });
@@ -398,7 +406,7 @@ describe("webhook: BILLING.SUBSCRIPTION.ACTIVATED", () => {
 
     await h.engine.handleWebhookEvent("BILLING.SUBSCRIPTION.ACTIVATED", { id: "I-ABC123" });
 
-    expect(h.eventBus.emitted[0].name).toBe(PaypalSubscriptionEvents.RESUMED);
+    expect(h.rail.payloads[0]).toMatchObject({ status: "active", transition: "status" });
   });
 
   it("ignores unknown subscriptions", async () => {
@@ -409,7 +417,7 @@ describe("webhook: BILLING.SUBSCRIPTION.ACTIVATED", () => {
     });
 
     expect(result).toEqual({ action: "not_supported" });
-    expect(h.eventBus.emitted).toHaveLength(0);
+    expect(h.rail.payloads).toHaveLength(0);
   });
 
   it("is idempotent on duplicate state events", async () => {
@@ -418,7 +426,7 @@ describe("webhook: BILLING.SUBSCRIPTION.ACTIVATED", () => {
 
     await h.engine.handleWebhookEvent("BILLING.SUBSCRIPTION.CANCELLED", { id: "I-ABC123" });
 
-    expect(h.eventBus.emitted).toHaveLength(0);
+    expect(h.rail.payloads).toHaveLength(0);
   });
 });
 
@@ -440,8 +448,8 @@ describe("webhook: first-period PAYMENT.SALE.COMPLETED", () => {
     });
     expect(h.module.subscriptions[0].first_sale_id).toBe("sale_1");
     expect(h.orderModule.createOrders).not.toHaveBeenCalled(); // cart completion owns the first order
-    expect(h.eventBus.emitted).toEqual([
-      expect.objectContaining({ name: PaypalSubscriptionEvents.PAYMENT_SUCCEEDED }),
+    expect(h.rail.payloads).toEqual([
+      expect.objectContaining({ status: "active", transition: "payment_succeeded" }),
     ]);
   });
 
@@ -455,7 +463,9 @@ describe("webhook: first-period PAYMENT.SALE.COMPLETED", () => {
     const second = await h.engine.handleWebhookEvent("PAYMENT.SALE.COMPLETED", payload);
 
     expect(second).toEqual({ action: "not_supported" });
-    expect(h.eventBus.emitted).toHaveLength(1);
+    // One delivery records the sale, the duplicate is a no-op — and only the
+    // recording one publishes.
+    expect(h.rail.payloads).toHaveLength(1);
   });
 });
 
@@ -506,11 +516,14 @@ describe("renewal orders", () => {
       expect.objectContaining({ sale_id: "sale_1" }),
       expect.objectContaining({ sale_id: "sale_2", order_id: "order_renewal_1" }),
     ]);
-    expect(h.eventBus.emitted[0]).toMatchObject({
-      name: PaypalSubscriptionEvents.PAYMENT_SUCCEEDED,
-      data: expect.objectContaining({
-        payment: expect.objectContaining({ sale_id: "sale_2", order_id: "order_renewal_1" }),
-      }),
+    expect(h.rail.payloads[0]).toMatchObject({
+      provider_subscription_id: "I-ABC123",
+      status: "active",
+      transition: "payment_succeeded",
+      // The renewal's own charge time travels with the payload: the row's
+      // status was already ACTIVE, so this timestamp is the only thing that
+      // tells a consumer a charge happened at all.
+      last_billing_at: expect.any(String),
     });
   });
 
@@ -789,7 +802,7 @@ describe("lifecycle actions", () => {
 
     expect(h.client.subscriptionAction).toHaveBeenCalledWith("I-ABC123", "cancel");
     expect(h.module.subscriptions[0].status).toBe("CANCELLED");
-    expect(h.eventBus.emitted[0].name).toBe(PaypalSubscriptionEvents.CANCELLED);
+    expect(h.rail.payloads[0]).toMatchObject({ status: "cancelled", transition: "status" });
   });
 
   it("is idempotent - no event or API call when already in the target state", async () => {
@@ -799,7 +812,7 @@ describe("lifecycle actions", () => {
     await h.engine.requestLifecycleAction(row[0], "cancel");
 
     expect(h.client.subscriptionAction).not.toHaveBeenCalled();
-    expect(h.eventBus.emitted).toHaveLength(0);
+    expect(h.rail.payloads).toHaveLength(0);
   });
 
   it("enforces ownership for customer self-service cancel", async () => {
@@ -827,7 +840,17 @@ describe("payment failure events", () => {
     });
 
     expect(h.module.subscriptions[0].failure_count).toBe(1);
-    expect(h.eventBus.emitted[0].name).toBe(PaypalSubscriptionEvents.PAYMENT_FAILED);
+    expect(h.rail.payloads[0]).toMatchObject({
+      status: "past_due",
+      transition: "payment_failed",
+    });
+    // The canonical fixture is the cross-repo contract: the payload carries
+    // exactly its keys, and `kind` is this provider's own family (a consumer
+    // joins on it — the provider cannot know its registration key).
+    expect(Object.keys(h.rail.payloads[0]).sort()).toEqual(
+      Object.keys(nativeSubscriptionChangedPayloads.paymentFailed).sort()
+    );
+    expect(h.rail.payloads[0].kind).toBe(PAYPAL_RAIL_KIND);
   });
 });
 
@@ -844,7 +867,7 @@ describe("reconciliation", () => {
 
     expect(result.aligned).toBe(1);
     expect(h.module.subscriptions[0].status).toBe("CANCELLED");
-    expect(h.eventBus.emitted[0].name).toBe(PaypalSubscriptionEvents.CANCELLED);
+    expect(h.rail.payloads[0]).toMatchObject({ status: "cancelled", transition: "status" });
   });
 
   it("backfills a missed first-period sale through the standard workflow", async () => {

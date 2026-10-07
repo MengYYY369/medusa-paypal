@@ -45,19 +45,5 @@ export type SubscriptionRefundRecord = {
   refunded_at: string;
 };
 
-export type SubscriptionEventPayload = {
-  subscription_id: string;
-  paypal_subscription_id: string;
-  status: PaypalSubscriptionStatus;
-  customer_id?: string | null;
-  variant_id?: string | null;
-  payment?: {
-    amount: number;
-    currency_code: string;
-    sale_id: string;
-    order_id?: string;
-  };
-};
-
 /** The payload our public subscription webhook route forwards. */
 export type SubscriptionWebhookPayload = WebhookPayload;

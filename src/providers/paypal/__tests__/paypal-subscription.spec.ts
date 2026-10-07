@@ -8,6 +8,7 @@ import {
   makeOrderModule,
   makePaymentModule,
   makeProductModule,
+  makeRailSink,
   makeVariant,
   makeRow,
 } from "../../../subscription/__tests__/fakes"
@@ -31,6 +32,11 @@ function createProvider({
 } = {}) {
   const subscriptionModule = new FakeSubscriptionModule()
   const eventBus = makeEventBus()
+  const rail = makeRailSink()
+  // One wiring point (the plugin entry's `onNativeSubscriptionChanged`) and
+  // one read point (the module service) — the provider reads it off the module
+  // exactly as it does in production.
+  subscriptionModule.nativeSubscriptionChangedHook = rail.hook
   const productModule = makeProductModule(variants)
   const orderModule = makeOrderModule(firstOrder)
   const paymentModule = makePaymentModule()
@@ -64,6 +70,7 @@ function createProvider({
     provider,
     subscriptionModule,
     eventBus,
+    rail,
     productModule,
     orderModule,
     paymentModule,
@@ -325,7 +332,7 @@ describe("PaypalModuleService (subscription branches)", () => {
 
       expect(result).toEqual({ action: "not_supported" })
       expect(h.subscriptionModule.subscriptions[0].status).toBe("CANCELLED")
-      expect(h.eventBus.emitted[0].name).toBe("paypal.subscription.cancelled")
+      expect(h.rail.payloads[0]).toMatchObject({ status: "cancelled", transition: "status" })
     })
 
     it("leaves PAYMENT.CAPTURE.* handling untouched", async () => {
@@ -343,7 +350,7 @@ describe("PaypalModuleService (subscription branches)", () => {
         action: "captured",
         data: { session_id: "sess_1", amount: 10.5 },
       })
-      expect(h.eventBus.emitted).toHaveLength(0)
+      expect(h.rail.payloads).toHaveLength(0)
     })
 
     it("still never acts when both webhook signatures fail to verify", async () => {

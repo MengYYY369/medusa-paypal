@@ -1,6 +1,6 @@
 {
   "name": "@mengyyy369/medusa-paypal",
-  "version": "0.9.5",
+  "version": "0.10.0",
   "description": "Medusa v2 PayPal payment provider with vaulted off-session renewals and official PayPal Subscriptions",
   "author": "MengYYY369",
   "license": "MIT",
@@ -29,11 +29,11 @@
     "./.medusa/server/src/modules/*": "./.medusa/server/src/modules/*/index.js",
     "./providers/*": "./.medusa/server/src/providers/*/index.js",
     "./*": "./.medusa/server/src/*.js",
-    "./binder": {
-      "types": "./.medusa/types/binder/index.d.ts",
-      "import": "./.medusa/server/src/binder/index.js",
-      "require": "./.medusa/server/src/binder/index.js",
-      "default": "./.medusa/server/src/binder/index.js"
+    "./rail": {
+      "types": "./.medusa/types/rail/index.d.ts",
+      "import": "./.medusa/server/src/rail/index.js",
+      "require": "./.medusa/server/src/rail/index.js",
+      "default": "./.medusa/server/src/rail/index.js"
     },
     "./admin": {
       "import": "./.medusa/server/src/admin/index.mjs",
@@ -56,7 +56,7 @@
   ],
   "scripts": {
     "build": "npx medusa plugin:build && npm run build:types",
-    "build:types": "tsc --project tsconfig.types.json",
+    "build:types": "node -e \"require('node:fs').rmSync('.medusa/types',{recursive:true,force:true})\" && tsc --project tsconfig.types.json",
     "test": "jest",
     "dev": "medusa plugin:develop",
     "prepublishOnly": "medusa plugin:build"

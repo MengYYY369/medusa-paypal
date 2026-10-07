@@ -430,7 +430,7 @@ curl -X POST http://localhost:9000/admin/paypal/plans/sync \
 - 购物车总额 = **完整周期价**(例如 `$9.99`)。
 - 若配了试用期/设置费,首期 PayPal **只收设置费(或 0)**,试用期后第一期才收全价。
 - 因此首购订单可能是**部分捕获**(例如只捕获了设置费),这是正常现象;
-  实际扣款金额以 `paypal.subscription.*` 事件与 PayPal 侧为准。
+  实际扣款金额以订单的支付记录与 PayPal 侧为准（轨道事件带的是订阅状态，不是钱）。
 - 续费单金额 = 首次下单时锁定的变体价(防止日后改价影响老用户)。
 
 ---
@@ -543,7 +543,7 @@ POST /store/paypal/client-token
 | 1 | 结账 → 插件建 PayPal 订阅(APPROVAL_PENDING) | — |
 | 2 | 买家批准(redirect 或 Buttons) | `BILLING.SUBSCRIPTION.ACTIVATED` → 本地行转 ACTIVE |
 | 3 | PayPal 收首期(设置费/全价) | `PAYMENT.SALE.COMPLETED` → 走标准捕获机制 |
-| 4 | 标准购物车结算完成 | 首购订单生成(`paypal.subscription.payment_succeeded`) |
+| 4 | 标准购物车结算完成 | 首购订单生成（轨道事件 `transition: payment_succeeded`） |
 | 5 | 买家批准后没回店? | 对账 job 自动把首购补成订单(见 13) |
 
 ### 10.2 续费(周期扣款)
@@ -604,29 +604,33 @@ curl -X POST http://localhost:9000/admin/paypal/subscriptions/ppsub_xxx/actions 
 | GET/POST | `/store/paypal/client-token` | 取 PayPal 客户端令牌(Card Fields 用) |
 | POST | `/store/paypal/account-holder` | (Vault)登记 account holder,让已保存的支付方式可被列出/更换 |
 
-### 11.3 事件总线事件(`paypal.subscription.*`)
+### 11.3 轨道事件(`payment-rail.native_subscription.changed`)
 
-插件在 Medusa 事件总线上发出:
+插件**不再自己定义事件名**（0.10.0 起 `paypal.subscription.*` 已删除）：宿主把
+`medusa-payment-methods` 的 `emitNativeSubscriptionChanged` 接到本插件的
+`onNativeSubscriptionChanged` 选项上，事件名、载荷与发布全部由那个插件拥有
+（见 README「The rail descriptor」）。每次状态变化发出的是**完整记录**：
 
-| 事件 | 触发时机 |
+| 字段 | 说明 |
 | --- | --- |
-| `paypal.subscription.activated` | 订阅激活 |
-| `paypal.subscription.suspended` | 订阅暂停 |
-| `paypal.subscription.resumed` | 订阅恢复 |
-| `paypal.subscription.cancelled` | 订阅取消 |
-| `paypal.subscription.expired` | 订阅过期 |
-| `paypal.subscription.payment_succeeded` | 周期扣款成功 |
-| `paypal.subscription.payment_failed` | 周期扣款失败 |
+| `transition` | `status`（状态变化）/ `payment_succeeded`（扣款成功）/ `payment_failed`（扣款失败） |
+| `status` | 轨中性状态：`active` / `paused` / `past_due` / `cancelled`，或 `null`（不镜像，如 APPROVAL_PENDING） |
+| `kind` | `"paypal"`（跨仓的加入键；`provider_id` 只是支付会话回显，常为 null） |
+| 其余 | `provider_subscription_id` / `plan_id` / `customer_id` / `variant_id` / `interval_unit` / `interval_count` / `next_billing_at` / `last_billing_at` |
 
-可在自己的 subscriber 里监听做通知/权益发放:
+可在自己的 subscriber 里监听做通知/权益发放：
 
 ```ts
 export default function subscribe({ eventBusService }) {
-  eventBusService.subscribe("paypal.subscription.payment_succeeded", async (data) => {
-    // data 里带订阅 id、金额、币种等
+  eventBusService.subscribe("payment-rail.native_subscription.changed", async (data) => {
+    if (data.kind !== "paypal") return;
+    // 续费成功时 PayPal 侧状态仍是 ACTIVE，只有 last_billing_at 变化——
+    // 所以靠 data.transition 区分「扣款成功」与「状态刷新」。
   });
 }
 ```
+
+未接钩子的宿主会在启动时看到一条警告，且不会发出任何轨道事件。
 
 ---
 
