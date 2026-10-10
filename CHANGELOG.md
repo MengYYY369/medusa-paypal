@@ -493,9 +493,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_以下条目来自 2026-09-21/22 源码审查工单（`.scratch/source-repo-fixes/issues` #01–#07），**代码尚未实现**，读到这里请勿当作已交付行为。_
+_以下条目来自 2026-09-21/22 源码审查工单（`.scratch/source-repo-fixes/issues` #01–#07）。_
+_**`### Planned` 下的条目代码尚未实现**，读到这里请勿当作已交付行为；`### Fixed` / `### Changed` / `### Added` 下的已落地。_
 
-### Fixed (planned #01–#04)
+### Fixed
+
+- **empty credentials fail loudly instead of as a PayPal 401** (#01): every entry
+  point that builds a client asserts the resolved configuration first
+  (`assertPaypalConfigured`, throwing the named `PaypalNotConfiguredError`), so a
+  missing credential pair reads as "PayPal is not configured" instead of the
+  SDK's `Basic Og==` → 401. The shared helper is `resolvePaypalClient` (the
+  client-token route and the subscription-webhook route both go through it); the
+  rail's vault-binding path runs the same guard at its first call and maps it to
+  a 500 `unexpected_state`. There is deliberately **no** environment-variable
+  fallback: the host reads `PAYPAL_*` itself and passes the values in explicitly
+  (`medusa-config.ts`), and the admin settings page is the runtime layer.
+
+### Planned
+
+#### Fixed — #02, #03, #04
 
 - **deletePayment** no longer throws for subscription-type sessions (the PayPal
   billing subscription is cancelled with an "Abandoned checkout" note, and
@@ -503,12 +519,6 @@ _以下条目来自 2026-09-21/22 源码审查工单（`.scratch/source-repo-fix
   created a PayPal order (`CANCELED` stub) — switching between payment tracks no
   longer produces a 500. (Note: `Could not delete all payment sessions` is
   Medusa core's wrapper text; the plugin's own throw is the missing-`data.id` one.)
-- **credential fallback**: the service constructor falls back to
-  `PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET` / `PAYPAL_IS_SANDBOX` /
-  `PAYPAL_WEBHOOK_ID` / `PAYPAL_SUBSCRIPTION_WEBHOOK_ID` when options are
-  missing (explicit options win when both are present). A
-  `resolvePaypalProviderConfig` helper serves the four sites that construct the
-  service outside the provider container.
 - **approve link**: vaulted checkouts that receive `payer-action` instead of
   `approve` are now matched (both in `initiatePayment` and in
   `initiateSubscriptionSession`), eliminating the silently-missing
@@ -516,14 +526,14 @@ _以下条目来自 2026-09-21/22 源码审查工单（`.scratch/source-repo-fix
 - **item contract**: missing `title` / `unit_price` (and non-numeric `quantity`)
   raise a clear `INVALID_DATA` error naming the field instead of a generic 500.
 
-### Changed (planned #05)
+#### Changed — #05
 
 - **Dependencies**: `@mikro-orm/*` dev and peer dependencies from 6.4.3 to
   exactly 6.6.14 to match the version embedded in Medusa 2.20, eliminating the
   duplicate-copy `improper qualified name (too many dotted names)` cart 500.
   **Not yet done — this release still declares 6.4.3.**
 
-### Added (planned #07)
+#### Added — #07
 
 - Switch subscription in place via PayPal `POST /v1/billing/subscriptions/{id}/revise`
   (same-product plan/frequency change, no cancel-then-resubscribe), a

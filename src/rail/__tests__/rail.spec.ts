@@ -1,4 +1,8 @@
-import { createPaypalRail, PaypalApprovalPendingError } from "../index";
+import {
+  createPaypalRail,
+  PaypalApprovalPendingError,
+  PaypalNotConfiguredError,
+} from "../index";
 import {
   PAYPAL_RAIL_KIND,
   toNativeDeclaration,
@@ -142,6 +146,25 @@ describe("createPaypalRail", () => {
     ).toThrow();
   });
 
+  it("builds without credentials and only fails at the first binding call (#01)", async () => {
+    // A host that only ever uses the native rail never hands us credentials,
+    // so the factory must not punish it at boot - the guard fires where the
+    // credentials are actually spent.
+    const rail = createPaypalRail({
+      ...RAIL_OPTIONS,
+      clientId: "",
+      clientSecret: "   ",
+    });
+
+    await expect(
+      rail.binding.start({
+        customerId: "cus_1",
+        returnUrl: "https://shop.test/return",
+        cancelUrl: "https://shop.test/cancel",
+      })
+    ).rejects.toBeInstanceOf(PaypalNotConfiguredError);
+  });
+
   it("classifies its own failures for the plugin's boundary", () => {
     const rail = createPaypalRail(RAIL_OPTIONS);
 
@@ -168,6 +191,23 @@ describe("createPaypalRail", () => {
       type: "unexpected_state",
     });
     expect(rail.mapError?.(new Error("some other failure"))).toBeNull();
+  });
+
+  it("claims missing credentials as an operator fault, not a PayPal outage (#01)", () => {
+    const rail = createPaypalRail(RAIL_OPTIONS);
+
+    expect(
+      rail.mapError?.(new PaypalNotConfiguredError("PayPal is not configured."))
+    ).toEqual({ status: 500, type: "unexpected_state" });
+
+    // Recognised by name too, for a host holding a duplicate copy of the package.
+    expect(
+      rail.mapError?.(
+        Object.assign(new Error("PayPal is not configured."), {
+          name: "PaypalNotConfiguredError",
+        })
+      )
+    ).toEqual({ status: 500, type: "unexpected_state" });
   });
 
   it("skips a cancel it cannot serve instead of throwing", async () => {

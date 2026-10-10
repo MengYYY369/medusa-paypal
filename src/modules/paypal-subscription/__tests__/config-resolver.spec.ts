@@ -7,6 +7,7 @@ import {
   maskSecret,
   mergePaypalConfigLayers,
   PaypalCredentialEnvironmentMismatchError,
+  PaypalNotConfiguredError,
 } from "../lib/config-resolver";
 import {
   PaypalSubscriptionConfig,
@@ -305,6 +306,28 @@ describe("assertPaypalConfigured", () => {
         type: MedusaError.Types.INVALID_DATA,
         message: expect.stringContaining("admin PayPal settings page"),
       });
+    }
+  });
+
+  it("throws a catchable class that keeps INVALID_DATA (#01)", () => {
+    // The rail classifies this by class (and by name, for a host that holds a
+    // duplicate copy of the package). The type must stay INVALID_DATA: the
+    // admin settings page renders it as a form error, and the vault capability
+    // re-wraps it as UNEXPECTED_STATE itself.
+    for (const blank of [
+      { ...configured, clientId: "" },
+      { ...configured, clientSecret: "  " },
+    ]) {
+      try {
+        assertPaypalConfigured(blank);
+        throw new Error("expected assertPaypalConfigured to throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(PaypalNotConfiguredError);
+        expect(error).toMatchObject({
+          name: "PaypalNotConfiguredError",
+          type: MedusaError.Types.INVALID_DATA,
+        });
+      }
     }
   });
 });

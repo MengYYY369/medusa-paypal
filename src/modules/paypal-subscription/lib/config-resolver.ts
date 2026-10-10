@@ -287,6 +287,21 @@ export function maskSecret(value: string | null | undefined): string | null {
 }
 
 /**
+ * The plugin has no usable credential pair. A `MedusaError` subclass so the
+ * rail (and any host) can classify it by `name` instead of matching message
+ * text; the `type` stays INVALID_DATA because the admin settings page renders
+ * this as a form error (and the vault capability re-wraps it as
+ * UNEXPECTED_STATE itself - see `service.ts`).
+ */
+export class PaypalNotConfiguredError extends MedusaError {
+  constructor(message: string) {
+    super(MedusaError.Types.INVALID_DATA, message);
+
+    this.name = "PaypalNotConfiguredError";
+  }
+}
+
+/**
  * Runtime guard for every PayPal entry point. With empty credentials the SDK
  * sends `Basic Og==` and PayPal answers 401, which reads as a bad credential
  * instead of a missing configuration. The guard runs on the resolved config
@@ -295,8 +310,7 @@ export function maskSecret(value: string | null | undefined): string | null {
  */
 export function assertPaypalConfigured(config: PaypalResolvedConfig): void {
   if (!provides(config.clientId) || !provides(config.clientSecret)) {
-    throw new MedusaError(
-      MedusaError.Types.INVALID_DATA,
+    throw new PaypalNotConfiguredError(
       "PayPal is not configured. Set clientId and clientSecret on the admin PayPal settings page."
     );
   }

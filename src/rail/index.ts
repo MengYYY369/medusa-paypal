@@ -24,6 +24,11 @@
  * binding path (the provider instance is not in the container, D12). The native
  * rail is the exception: it resolves the plugin's own module from the container
  * the caller passes in, exactly like the module's own routes do.
+ *
+ * Credentials are required for the binding path only: an unconfigured rail
+ * throws at its first binding call (`PaypalNotConfiguredError`, mapped to a 500
+ * by `mapError`) rather than at boot, so a host that only uses the native rail
+ * is unaffected.
  */
 
 import { MedusaError } from "@medusajs/framework/utils";
@@ -31,9 +36,11 @@ import type { MedusaContainer } from "@medusajs/framework/types";
 import { PaypalService } from "../providers/paypal/paypal-core/paypal-core";
 import {
   assertNoCredentialEnvironmentMismatch,
+  assertPaypalConfigured,
   detectDeclaredCredentialEnvironmentMismatch,
   PaypalCredentialEnvironmentMismatchError,
   PaypalEnvironment,
+  PaypalNotConfiguredError,
 } from "../modules/paypal-subscription/lib/config-resolver";
 import { ApprovalAlreadyUsedError, completeVaultApproval, startVaultApproval } from "../vault";
 import {
@@ -49,6 +56,12 @@ import type {
 
 export * from "./types";
 export { PAYPAL_RAIL_KIND } from "./records";
+/**
+ * Thrown by the binding path when the rail was built without credentials;
+ * re-exported so a host catching rail failures can name the class from the same
+ * import it builds the rail with.
+ */
+export { PaypalNotConfiguredError } from "../modules/paypal-subscription/lib/config-resolver";
 
 /** PayPal credentials the descriptors need; the same source as the provider options. */
 export type PaypalRailOptions = {
@@ -146,8 +159,25 @@ export function createPaypalRail(
 
   let client: PaypalService | undefined;
 
+  /**
+   * The vault path is the only one that spends these credentials - the native
+   * path reads the plugin's own module off the container, which resolves its
+   * own configuration. So the "is it configured" guard lives here, at first
+   * binding call, and not in the factory: a host that only ever uses the
+   * native rail must not fail at boot over credentials it never hands us.
+   * Empty credentials would otherwise reach PayPal as `Basic Og==` and come
+   * back as a 401 that reads like a bad credential (#01 / MP-2).
+   */
   const getClient = (): PaypalService => {
     if (!client) {
+      assertPaypalConfigured({
+        clientId: options.clientId,
+        clientSecret: options.clientSecret,
+        isSandbox: options.isSandbox,
+        includeShippingData: false,
+        includeCustomerData: false,
+      });
+
       client = new PaypalService({
         clientId: options.clientId,
         clientSecret: options.clientSecret,
@@ -291,17 +321,22 @@ export function createPaypalRail(
     },
 
     /**
-     * The credential-environment mismatch is an operator fault, not a customer
-     * refusal: it keeps its 500 and its own message (the copy names both
-     * environments, which is the only way the operator can see what to fix).
+     * Two operator faults keep their 500 and their own message: the
+     * credential-environment mismatch (the copy names both environments, which
+     * is the only way the operator can see what to fix) and missing
+     * credentials (the copy names the settings page). Both are the
+     * deployment's problem, not the customer's - letting them fall through to
+     * `return null` would have the plugin report a PayPal outage instead.
      * Everything else this provider throws is unclassified and becomes the
      * plugin's 502 `provider_error`.
      */
     mapError(error) {
       if (
         error instanceof PaypalCredentialEnvironmentMismatchError ||
+        error instanceof PaypalNotConfiguredError ||
         (error instanceof Error &&
-          error.name === "PaypalCredentialEnvironmentMismatchError")
+          (error.name === "PaypalCredentialEnvironmentMismatchError" ||
+            error.name === "PaypalNotConfiguredError"))
       ) {
         return { status: 500, type: "unexpected_state" };
       }
