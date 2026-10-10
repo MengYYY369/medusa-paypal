@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-10-10
+
+_来自 2026-10-10 的 PayPal 沙箱实测（`.scratch/paypal-subscriptions/sandbox-plan-switch-2026-10-10.md`）：0.10.1 的改签实现把 PayPal 的「改签需买家同意」当成了同步生效，本地行在买家还没点同意时就已经改成了新计划。_
+
+### Fixed
+
+- **改签是买家同意流程，不是一次写入** (#09)：`POST /v1/billing/subscriptions/{id}/revise`
+  返回 **200 + `rel=approve` 链接**，在买家打开该链接确认之前 PayPal 仍按旧计划计费
+  （PayPal 文档原文："This type of update requires the buyer's consent"）。0.10.1 却在这之后
+  立刻把本地行改成新计划，于是前台显示的计划与 PayPal 实际扣费的完全不一致。现在：
+  `customerRevise` 返回 `{ subscription, approvalUrl, pending }`，**pending 期间本地行不动**
+  （`subscription` 仍是旧计划，`pending: true`，`approval_url` 给前台跳转）。
+  改签真正落地走两条路：`BILLING.SUBSCRIPTION.UPDATED` webhook（新增分支，见下）与每日
+  对账（新增 plan 漂移自愈）。PayPal 若未返回同意链接，则视为无需同意、当场落库
+  （`pending: false`）。
+- **改签只在 `ACTIVE` 时发起** (#09)：沙箱实测 `SUSPENDED` 订阅调 revise 得到
+  `422 SUBSCRIPTION_STATUS_INVALID`（"subscription status should be active"），跨产品用例
+  因此永远走不到 `PLAN_PRODUCT_NOT_COMPATIBLE`。状态守卫由 `ACTIVE | SUSPENDED` 收窄为
+  仅 `ACTIVE`，报错直接给出出路（"Resume the subscription first, then switch its plan."）。
+- **`BILLING.SUBSCRIPTION.UPDATED` 现在会被处理** (#09)：新增 webhook 分支 →
+  `onSubscriptionUpdated`：按 `paypal_subscription_id` 找到行 → 用事件自带的
+  `billing_info.next_billing_time` 刷新续费日（不额外调 PayPal）→ 若 `plan_id` 与本地不同，
+  用 `listPaypalPlans({ paypal_plan_id })` 反查回 variant，再落库。PayPal 报来本插件不认识的
+  plan id 时只 warn 并保留本地计划（行里留着的仍是可计价的计划）。
+  **宿主需要在订阅 webhook 里勾选 `BILLING.SUBSCRIPTION.UPDATED`**，否则改签只能靠每日对账收敛。
+- **对账会修 plan 漂移** (#09)：`reconcile()` 在状态对齐、续费日回填之后，比对
+  `subscription.plan_id` 与本地 `paypal_plan_id`，不一致则走同一条反查落库路径，
+  把「买家已同意但 webhook 丢了」的改签补齐（计入 `aligned`）。
+- **三条路径共用一个落库函数** (#09)：新增私有 `applyPlanSwitch(row, target)`，
+  variant / plan id / 锁定金额 / 计费周期一起搬移，并只发一次 `transition: "status"` 的
+  rail 事件 —— 改签、UPDATED webhook、对账三处的本地结果完全一致。
+
+### Changed
+
+- **改签接口响应体**（`POST /store/paypal/subscriptions/:id/revise`）由 `{ subscription }`
+  变为 `{ subscription, approval_url, pending }`；仍返回 200，`pending: true` 时
+  `subscription` 是**未改动**的旧计划行，前台应把买家送到 `approval_url` 并在返回后重新拉取订阅。
+  `pending: false` 表示改签已生效（`approval_url` 为 `null`）。
+- `PaypalService.reviseSubscription` 的文档注释按实测修正（只接受 `ACTIVE`、需买家同意），
+  并保留 PayPal 响应体（含 `links`）以便读取同意链接。
+- README 的「Plan switch」契约同步更新。
+
+### Tests
+
+- `subscription-engine.spec.ts`：新增「需要同意时把买家交给 PayPal」「`payer-action` 链接同样
+  可用」「UPDATED 落库改签」「未知 plan 只 warn」「plan 未变只刷续费日」「UPDATED 忽略未知订阅」
+  「`SUSPENDED` 被拒并提示先 resume」「对账修复 plan 漂移」；原「就地改签」用例补 `pending: false`
+  断言，no-op 用例改用 `subscription.variant_id`。
+
 ## [0.10.1] - 2026-10-10
 
 _来自 2026-09-21/22 源码审查工单（`.scratch/source-repo-fixes/issues` #01–#07），全部条目均已落地。_

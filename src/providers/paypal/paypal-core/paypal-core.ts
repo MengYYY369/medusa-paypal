@@ -957,8 +957,17 @@ export class PaypalService {
    * Revises an existing subscription in place - the plan (and therefore the
    * price and the billing frequency) changes, the subscription id, its
    * approval and its billing history do not. PayPal only accepts this on an
-   * ACTIVE or SUSPENDED subscription, and rejects a plan that belongs to
+   * ACTIVE subscription (anything else answers 422 SUBSCRIPTION_STATUS_INVALID,
+   * "subscription status should be active") and rejects a plan that belongs to
    * another product with PLAN_PRODUCT_NOT_COMPATIBLE.
+   *
+   * The call is a **consent request**: a 200 response carries a `rel=approve`
+   * (or `payer-action`) link and the subscription keeps billing the old plan
+   * until the buyer approves on that page - PayPal's own wording is "This type
+   * of update requires the buyer's consent". The caller must therefore treat
+   * the returned `links` as the source of truth for whether the switch is live
+   * (verified against the sandbox on 2026-10-10), and let
+   * BILLING.SUBSCRIPTION.UPDATED report the new `plan_id` when it lands.
    *
    * The new plan takes effect on the next billing cycle: PayPal does not
    * prorate the remainder of the current cycle. `requestId` is required

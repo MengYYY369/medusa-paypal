@@ -646,6 +646,113 @@ describe("webhook: BILLING.SUBSCRIPTION.ACTIVATED", () => {
   });
 });
 
+describe("webhook: BILLING.SUBSCRIPTION.UPDATED (consented plan switch)", () => {
+  const monthly = makeVariant({ product_id: "prod_1" });
+  const yearly = makeVariant({
+    id: "variant_2",
+    title: "Yearly Club",
+    product_id: "prod_1",
+    metadata: { paypal_subscription: { interval_unit: "YEAR", interval_count: 1 } },
+    prices: [{ currency_code: "usd", amount: 199 }],
+  });
+
+  const updatedEvent = (planId: string) => ({
+    id: "I-ABC123",
+    status: "ACTIVE",
+    plan_id: planId,
+    billing_info: { next_billing_time: "2026-11-10T10:00:00Z" },
+  });
+
+  it("lands the switch the buyer approved on PayPal's page", async () => {
+    const h = makeHarness({ variants: [monthly, yearly] });
+    await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", variant_id: "variant_1", paypal_plan_id: "plan_1" })
+    );
+    await h.module.createPaypalPlans({
+      variant_id: "variant_2",
+      currency_code: "usd",
+      paypal_plan_id: "plan_year",
+      config_hash: "hash_year",
+    });
+
+    const result = await h.engine.handleWebhookEvent(
+      "BILLING.SUBSCRIPTION.UPDATED",
+      updatedEvent("plan_year")
+    );
+
+    expect(result).toEqual({ action: "not_supported" });
+    expect(h.module.subscriptions[0]).toMatchObject({
+      variant_id: "variant_2",
+      paypal_plan_id: "plan_year",
+      locked_amount: 199,
+      interval_unit: "YEAR",
+      interval_count: 1,
+    });
+    // No extra PayPal call: the webhook carries the renewal date.
+    expect(h.client.getSubscription).not.toHaveBeenCalled();
+    expect(h.rail.payloads.at(-1)).toMatchObject({
+      transition: "status",
+      status: "active",
+      variant_id: "variant_2",
+      plan_id: "plan_year",
+      interval_unit: "YEAR",
+      interval_count: 1,
+      next_billing_at: "2026-11-10T10:00:00.000Z",
+    });
+  });
+
+  it("keeps the local plan when PayPal reports a plan this plugin does not know", async () => {
+    const h = makeHarness({ variants: [monthly, yearly] });
+    await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", variant_id: "variant_1", paypal_plan_id: "plan_1" })
+    );
+
+    await h.engine.handleWebhookEvent(
+      "BILLING.SUBSCRIPTION.UPDATED",
+      updatedEvent("plan_foreign")
+    );
+
+    expect(h.module.subscriptions[0]).toMatchObject({
+      variant_id: "variant_1",
+      paypal_plan_id: "plan_1",
+    });
+    expect(h.rail.payloads).toHaveLength(0);
+    expect(loggerStub.warn).toHaveBeenCalledWith(
+      expect.stringContaining("which this plugin does not know")
+    );
+  });
+
+  it("refreshes only the renewal date when the plan is unchanged", async () => {
+    const h = makeHarness({ variants: [monthly, yearly] });
+    await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", variant_id: "variant_1", paypal_plan_id: "plan_1" })
+    );
+
+    await h.engine.handleWebhookEvent(
+      "BILLING.SUBSCRIPTION.UPDATED",
+      updatedEvent("plan_1")
+    );
+
+    expect(h.module.subscriptions[0].next_billing_at).toEqual(
+      new Date("2026-11-10T10:00:00Z")
+    );
+    expect(h.module.subscriptions[0].variant_id).toBe("variant_1");
+    expect(h.rail.payloads).toHaveLength(0);
+  });
+
+  it("ignores unknown subscriptions", async () => {
+    const h = makeHarness();
+
+    const result = await h.engine.handleWebhookEvent(
+      "BILLING.SUBSCRIPTION.UPDATED",
+      updatedEvent("plan_year")
+    );
+
+    expect(result).toEqual({ action: "not_supported" });
+    expect(h.rail.payloads).toHaveLength(0);
+  });
+});
+
 describe("webhook: first-period PAYMENT.SALE.COMPLETED", () => {
   it("returns the standard captured action and records the first sale id", async () => {
     const h = makeHarness();
@@ -1078,7 +1185,10 @@ describe("plan switch (revise)", () => {
     // In place: no cancel, no new subscription.
     expect(h.client.subscriptionAction).not.toHaveBeenCalled();
     expect(h.client.createSubscription).not.toHaveBeenCalled();
-    expect(revised).toMatchObject({
+    // PayPal answered without a consent link, so the switch is already live.
+    expect(revised.pending).toBe(false);
+    expect(revised.approvalUrl).toBeNull();
+    expect(revised.subscription).toMatchObject({
       variant_id: "variant_2",
       paypal_plan_id: "plan_P1",
       locked_amount: 199,
@@ -1106,9 +1216,78 @@ describe("plan switch (revise)", () => {
       variantId: "variant_2",
     });
 
-    expect(revised.variant_id).toBe("variant_2");
+    expect(revised.pending).toBe(false);
+    expect(revised.subscription.variant_id).toBe("variant_2");
     expect(h.client.reviseSubscription).not.toHaveBeenCalled();
     expect(h.rail.payloads).toHaveLength(0);
+  });
+
+  it("hands the buyer to PayPal when the revise needs consent", async () => {
+    // Sandbox 2026-10-10: revise answers 200 with a rel=approve link and the
+    // subscription keeps billing on the old plan until the buyer opens it
+    // (PayPal docs: "This type of update requires the buyer's consent").
+    const h = makeHarness({
+      variants: [monthly, yearly],
+      client: makeClient({
+        reviseSubscription: jest.fn().mockResolvedValue({
+          id: "I-ABC123",
+          status: "ACTIVE",
+          links: [
+            {
+              rel: "approve",
+              href: "https://www.sandbox.paypal.com/webapps/billing/subscriptions/update?ba_token=BA-1NP47457MG4301629",
+            },
+          ],
+        }),
+      }),
+    });
+    const row = await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", variant_id: "variant_1" })
+    );
+
+    const result = await h.engine.customerRevise(row[0], "cus_1", {
+      variantId: "variant_2",
+    });
+
+    expect(result.pending).toBe(true);
+    expect(result.approvalUrl).toBe(
+      "https://www.sandbox.paypal.com/webapps/billing/subscriptions/update?ba_token=BA-1NP47457MG4301629"
+    );
+    // Nothing local moved: writing the new plan here would show the customer a
+    // plan PayPal is not billing yet.
+    expect(result.subscription).toMatchObject({
+      variant_id: "variant_1",
+      locked_amount: 19.99,
+      interval_unit: "MONTH",
+    });
+    expect(h.module.subscriptions[0]).toMatchObject({
+      variant_id: "variant_1",
+      interval_unit: "MONTH",
+    });
+    expect(h.rail.payloads).toHaveLength(0);
+  });
+
+  it("accepts a payer-action link as the consent URL too", async () => {
+    const h = makeHarness({
+      variants: [monthly, yearly],
+      client: makeClient({
+        reviseSubscription: jest.fn().mockResolvedValue({
+          id: "I-ABC123",
+          status: "ACTIVE",
+          links: [{ rel: "payer-action", href: "https://www.paypal.com/payer-action/BA-1" }],
+        }),
+      }),
+    });
+    const row = await h.module.createPaypalSubscriptions(makeRow({ status: "ACTIVE" }));
+
+    const result = await h.engine.customerRevise(row[0], "cus_1", {
+      variantId: "variant_2",
+    });
+
+    expect(result).toMatchObject({
+      pending: true,
+      approvalUrl: "https://www.paypal.com/payer-action/BA-1",
+    });
   });
 
   it("reuses the same idempotency key when the same switch is retried", async () => {
@@ -1140,6 +1319,24 @@ describe("plan switch (revise)", () => {
     const keys = h.client.reviseSubscription.mock.calls.map((call: any[]) => call[2]);
 
     expect(keys).toEqual(["revise-sub_1-plan_P1", "revise-sub_1-plan_P1"]);
+  });
+
+  it("refuses a suspended subscription and points at resume", async () => {
+    // PayPal answers 422 SUBSCRIPTION_STATUS_INVALID for a revise on anything
+    // but an active agreement (sandbox 2026-10-10), so the refusal happens
+    // before the call.
+    const h = makeHarness({ variants: [monthly, yearly] });
+    const row = await h.module.createPaypalSubscriptions(
+      makeRow({ status: "SUSPENDED", variant_id: "variant_1" })
+    );
+
+    await expect(
+      h.engine.customerRevise(row[0], "cus_1", { variantId: "variant_2" })
+    ).rejects.toMatchObject({
+      type: MedusaError.Types.INVALID_DATA,
+      message: expect.stringContaining("Resume the subscription first"),
+    });
+    expect(h.client.reviseSubscription).not.toHaveBeenCalled();
   });
 
   it("enforces ownership", async () => {
@@ -1251,6 +1448,51 @@ describe("reconciliation", () => {
     expect(result.aligned).toBe(1);
     expect(h.module.subscriptions[0].status).toBe("CANCELLED");
     expect(h.rail.payloads[0]).toMatchObject({ status: "cancelled", transition: "status" });
+  });
+
+  it("heals a plan switch PayPal applied but no webhook reported", async () => {
+    const yearly = makeVariant({
+      id: "variant_2",
+      title: "Yearly Club",
+      product_id: "prod_1",
+      metadata: { paypal_subscription: { interval_unit: "YEAR", interval_count: 1 } },
+      prices: [{ currency_code: "usd", amount: 199 }],
+    });
+    const h = makeHarness({
+      variants: [makeVariant(), yearly],
+      client: makeClient({
+        getSubscription: jest.fn().mockResolvedValue({
+          id: "I-ABC123",
+          status: "ACTIVE",
+          plan_id: "plan_year",
+          billing_info: { next_billing_time: "2026-11-10T10:00:00Z" },
+        }),
+      }),
+    });
+    await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", variant_id: "variant_1", paypal_plan_id: "plan_1" })
+    );
+    await h.module.createPaypalPlans({
+      variant_id: "variant_2",
+      currency_code: "usd",
+      paypal_plan_id: "plan_year",
+      config_hash: "hash_year",
+    });
+
+    const result = await h.engine.reconcile();
+
+    expect(result.aligned).toBe(1);
+    expect(h.module.subscriptions[0]).toMatchObject({
+      variant_id: "variant_2",
+      paypal_plan_id: "plan_year",
+      locked_amount: 199,
+      interval_unit: "YEAR",
+    });
+    expect(h.rail.payloads.at(-1)).toMatchObject({
+      transition: "status",
+      variant_id: "variant_2",
+      plan_id: "plan_year",
+    });
   });
 
   it("backfills a missed first-period sale through the standard workflow", async () => {

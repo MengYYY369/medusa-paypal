@@ -20,6 +20,13 @@ type ReviseBody = { variant_id?: string };
  *
  * A switch to the plan the subscription is already on is a no-op that returns
  * the unchanged row, so a retried request cannot fail on its own success.
+ *
+ * PayPal treats a plan change as a consent request, so the usual response is
+ * `pending: true` with an `approval_url`: nothing local has moved yet, the
+ * storefront sends the buyer to PayPal, and the switch lands through the
+ * BILLING.SUBSCRIPTION.UPDATED webhook (or the nightly reconciliation pass).
+ * `pending: false` means the switch needed no consent and `subscription`
+ * already carries the new plan.
  */
 export const POST = async (
   req: MedusaStoreRequest<ReviseBody>,
@@ -40,7 +47,7 @@ export const POST = async (
   const module = resolveSubscriptionModule(req.scope);
 
   try {
-    const subscription = await module.customerRevise(
+    const { subscription, approvalUrl, pending } = await module.customerRevise(
       req.params.id,
       customerId,
       { variantId },
@@ -50,7 +57,11 @@ export const POST = async (
       }
     );
 
-    return res.status(200).json({ subscription });
+    return res.status(200).json({
+      subscription,
+      approval_url: approvalUrl,
+      pending,
+    });
   } catch (error) {
     if (
       error instanceof MedusaError &&
@@ -60,8 +71,8 @@ export const POST = async (
     }
 
     // Refusals the customer can act on (not a subscription variant, not
-    // ACTIVE/SUSPENDED, another product's plan, PayPal's own 422): a 400 with
-    // the engine's message, which names the way out.
+    // ACTIVE, another product's plan, PayPal's own 422): a 400 with the
+    // engine's message, which names the way out.
     if (
       error instanceof MedusaError &&
       error.type === MedusaError.Types.INVALID_DATA

@@ -26,6 +26,7 @@ import { PaypalService } from "../../providers/paypal/paypal-core/paypal-core";
 import type { NativeSubscriptionChangedHook } from "../../rail/types";
 import * as vault from "../../vault";
 import {
+  CustomerReviseResult,
   SubscriptionEngine,
   SubscriptionEngineModules,
   SubscriptionEngineOptions,
@@ -611,14 +612,16 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
   /**
    * Customer self-service plan switch. Resolves the target variant (and its
    * live price for the subscription's currency), so this one needs the query
-   * and product modules - the store route passes them.
+   * and product modules - the store route passes them. Returns the switch
+   * result: `pending: true` (with the buyer's `approvalUrl`) when PayPal is
+   * waiting for consent, in which case the row has not moved yet.
    */
   async customerRevise(
     id: string,
     customerId: string,
     input: { variantId: string },
     modules: SubscriptionEngineModules = {}
-  ): Promise<any> {
+  ): Promise<CustomerReviseResult> {
     const row = await (this as any).retrievePaypalSubscription(id);
     const engine = await this.withModules(modules);
 

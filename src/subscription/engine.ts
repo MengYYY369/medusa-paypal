@@ -111,6 +111,20 @@ type SubscriptionRow = {
   metadata?: Record<string, unknown> | null;
 };
 
+/**
+ * Outcome of a customer-initiated plan switch. PayPal treats a revise as a
+ * consent request, so the usual answer is `pending: true`: nothing local has
+ * moved yet, the caller has to send the buyer to `approvalUrl`, and the switch
+ * lands on the row when PayPal confirms it (BILLING.SUBSCRIPTION.UPDATED
+ * webhook, or the nightly reconciliation pass). `pending: false` means the
+ * switch needed no consent and the row already moved.
+ */
+export type CustomerReviseResult = {
+  subscription: SubscriptionRow;
+  approvalUrl: string | null;
+  pending: boolean;
+};
+
 /** Webhook event types that belong to the subscription rail. */
 export function isSubscriptionEvent(eventType: string): boolean {
   return (
@@ -853,6 +867,9 @@ export class SubscriptionEngine {
       case "BILLING.SUBSCRIPTION.EXPIRED":
         await this.syncSubscriptionStatus(resource?.id, "EXPIRED");
         return { action: "not_supported" };
+      case "BILLING.SUBSCRIPTION.UPDATED":
+        await this.onSubscriptionUpdated(resource);
+        return { action: "not_supported" };
       case "BILLING.SUBSCRIPTION.PAYMENT.FAILED":
       case "PAYMENT.SALE.DENIED":
       case "PAYMENT.SALE.DECLINED":
@@ -911,6 +928,34 @@ export class SubscriptionEngine {
 
       await this.transitionRow(withBillingInfo, "ACTIVE", "status");
     }
+  }
+
+  /**
+   * A switch the buyer consented to lands here: UPDATED carries the
+   * subscription resource with its **new** plan id, which is exactly what a
+   * pending revise was waiting for. The renewal date is refreshed off the same
+   * payload; a plan id this plugin does not know only warns (see
+   * `applyPaypalPlanToRow`).
+   */
+  private async onSubscriptionUpdated(resource: any): Promise<void> {
+    const row = await this.findRowByPaypalId(resource?.id);
+
+    if (!row) {
+      this.deps.logger.warn(
+        `BILLING.SUBSCRIPTION.UPDATED for unknown subscription ${resource?.id}; ignoring`
+      );
+      return;
+    }
+
+    const withBillingInfo = await this.backfillNextBillingAt(row, resource);
+    const paypalPlanId =
+      typeof resource?.plan_id === "string" ? resource.plan_id : null;
+
+    if (!paypalPlanId || paypalPlanId === withBillingInfo.paypal_plan_id) {
+      return;
+    }
+
+    await this.applyPaypalPlanToRow(withBillingInfo, paypalPlanId);
   }
 
   /**
@@ -1558,6 +1603,16 @@ export class SubscriptionEngine {
    * plan applies from the next billing cycle, and the remainder of the current
    * cycle is not prorated.
    *
+   * PayPal treats a plan change as a **consent request**: the call answers 200
+   * with a `rel=approve` link and the subscription keeps billing on the old
+   * plan until the buyer opens that link (PayPal docs: "This type of update
+   * requires the buyer's consent"; confirmed against the sandbox on
+   * 2026-10-10). The local row is therefore left untouched while the switch is
+   * pending - writing the new plan here would show the customer a plan PayPal
+   * is not billing yet. The row moves when PayPal confirms the switch: the
+   * BILLING.SUBSCRIPTION.UPDATED webhook, the reconciliation pass, or a revise
+   * that came back without an approval link at all.
+   *
    * The rail is notified with `transition: "status"`: a revise keeps the
    * subscription where it is, so the host only has to refresh its mirror row -
    * the new plan id, price and interval ride along in the record itself. No
@@ -1567,7 +1622,7 @@ export class SubscriptionEngine {
     row: SubscriptionRow,
     customerId: string,
     input: { variantId: string }
-  ): Promise<SubscriptionRow> {
+  ): Promise<CustomerReviseResult> {
     const { client, subscriptionModule } = this.deps;
 
     if (row.customer_id !== customerId) {
@@ -1595,13 +1650,17 @@ export class SubscriptionEngine {
     // Already on the requested plan: converge instead of calling PayPal, so a
     // retry of a switch that already landed is a no-op rather than an error.
     if (target.variant.id === row.variant_id) {
-      return row;
+      return { subscription: row, approvalUrl: null, pending: false };
     }
 
-    if (row.status !== "ACTIVE" && row.status !== "SUSPENDED") {
+    // PayPal answers 422 SUBSCRIPTION_STATUS_INVALID ("subscription status
+    // should be active") for a revise on anything but an active agreement, so
+    // a suspended subscription is told to resume first instead of failing at
+    // PayPal.
+    if (row.status !== "ACTIVE") {
       throw new MedusaError(
         MedusaError.Types.INVALID_DATA,
-        `Subscription ${row.id} cannot switch plans while it is ${row.status}. Only an active or paused subscription can be revised.`
+        `Subscription ${row.id} cannot switch plans while it is ${row.status}. Resume the subscription first, then switch its plan.`
       );
     }
 
@@ -1618,8 +1677,10 @@ export class SubscriptionEngine {
     // switch reuses the original response instead of revising twice.
     const requestId = `revise-${row.id}-${planRow.paypal_plan_id}`;
 
+    let revised: PaypalSubscriptionResponse | undefined;
+
     try {
-      await client.reviseSubscription(
+      revised = await client.reviseSubscription(
         row.paypal_subscription_id,
         planRow.paypal_plan_id,
         requestId
@@ -1637,14 +1698,50 @@ export class SubscriptionEngine {
       throw error;
     }
 
+    const approvalUrl = extractApproveUrl(revised?.links);
+
+    if (approvalUrl) {
+      // Waiting on the buyer: the storefront sends them to PayPal and the
+      // switch lands through the webhook (or the reconciliation pass).
+      return { subscription: row, approvalUrl, pending: true };
+    }
+
+    const switched = await this.applyPlanSwitch(row, {
+      variantId: target.variant.id,
+      planId: planRow.paypal_plan_id,
+      amount: target.amount,
+      intervalUnit: target.declaration.interval_unit,
+      intervalCount: target.declaration.interval_count,
+    });
+
+    return { subscription: switched, approvalUrl: null, pending: false };
+  }
+
+  /**
+   * Writes a plan switch that PayPal has already confirmed. Shared by the
+   * revise path (a switch that needed no consent), the
+   * BILLING.SUBSCRIPTION.UPDATED webhook and the reconciliation pass, so all
+   * three land identically: variant, plan id, locked amount and interval move
+   * together, and the rail is notified once with `transition: "status"`.
+   */
+  private async applyPlanSwitch(
+    row: SubscriptionRow,
+    target: {
+      variantId: string;
+      planId: string;
+      amount: number;
+      intervalUnit: string;
+      intervalCount: number;
+    }
+  ): Promise<SubscriptionRow> {
     const updated = firstOrSelf(
-      await subscriptionModule.updatePaypalSubscriptions({
+      await this.deps.subscriptionModule.updatePaypalSubscriptions({
         id: row.id,
-        variant_id: target.variant.id,
-        paypal_plan_id: planRow.paypal_plan_id,
+        variant_id: target.variantId,
+        paypal_plan_id: target.planId,
         locked_amount: target.amount,
-        interval_unit: target.declaration.interval_unit,
-        interval_count: target.declaration.interval_count,
+        interval_unit: target.intervalUnit,
+        interval_count: target.intervalCount,
       })
     );
 
@@ -1652,16 +1749,60 @@ export class SubscriptionEngine {
       (updated as SubscriptionRow) ??
       ({
         ...row,
-        variant_id: target.variant.id,
-        paypal_plan_id: planRow.paypal_plan_id,
+        variant_id: target.variantId,
+        paypal_plan_id: target.planId,
         locked_amount: target.amount,
-        interval_unit: target.declaration.interval_unit,
-        interval_count: target.declaration.interval_count,
+        interval_unit: target.intervalUnit,
+        interval_count: target.intervalCount,
       } as SubscriptionRow);
 
     await this.notifyRailChange(next, "status", toRailStatus(next.status));
 
     return next;
+  }
+
+  /**
+   * Resolves a PayPal plan id back to a local plan row and applies the switch.
+   * Returns null (after a warning) when PayPal reports a plan this plugin does
+   * not know - a plan created outside the plugin, or pricing the host has since
+   * retired. The row then keeps its old plan id, which is visible in the admin
+   * and fixable, instead of pointing at a variant the host cannot price.
+   */
+  private async applyPaypalPlanToRow(
+    row: SubscriptionRow,
+    paypalPlanId: string
+  ): Promise<SubscriptionRow | null> {
+    const plans = await this.deps.subscriptionModule.listPaypalPlans({
+      paypal_plan_id: paypalPlanId,
+    });
+    const planRow = plans?.[0];
+
+    if (!planRow) {
+      this.deps.logger.warn(
+        `Subscription ${row.id} is on PayPal plan ${paypalPlanId}, which this plugin does not know; keeping the local plan ${row.paypal_plan_id}.`
+      );
+      return null;
+    }
+
+    const target = await this.resolveSubscriptionVariant(
+      planRow.variant_id,
+      row.currency_code
+    );
+
+    if (!target) {
+      this.deps.logger.warn(
+        `PayPal plan ${paypalPlanId} points at variant ${planRow.variant_id}, which is no longer a subscription variant; keeping the local plan for ${row.id}.`
+      );
+      return null;
+    }
+
+    return this.applyPlanSwitch(row, {
+      variantId: target.variant.id,
+      planId: paypalPlanId,
+      amount: target.amount,
+      intervalUnit: target.declaration.interval_unit,
+      intervalCount: target.declaration.interval_count,
+    });
   }
 
   /**
@@ -1827,7 +1968,20 @@ export class SubscriptionEngine {
         }
       }
 
-      // 2. Missed sales backfill.
+      // 2. Plan drift: a switch the buyer approved on PayPal's page whose
+      //    webhook never arrived (or arrived while the plugin was down).
+      const paypalPlanId =
+        typeof subscription.plan_id === "string" ? subscription.plan_id : null;
+
+      if (paypalPlanId && paypalPlanId !== row.paypal_plan_id) {
+        const switched = await this.applyPaypalPlanToRow(row, paypalPlanId);
+
+        if (switched) {
+          aligned += 1;
+        }
+      }
+
+      // 3. Missed sales backfill.
       const endTime = new Date().toISOString();
       const fallbackStart = new Date(Date.now() - 90 * 24 * 3600 * 1000);
       const startSource =

@@ -416,6 +416,7 @@ Subscribe it to these event types only:
 - `BILLING.SUBSCRIPTION.SUSPENDED`
 - `BILLING.SUBSCRIPTION.CANCELLED`
 - `BILLING.SUBSCRIPTION.EXPIRED`
+- `BILLING.SUBSCRIPTION.UPDATED` (needed for plan switches: the buyer's consent lands here)
 - `BILLING.SUBSCRIPTION.PAYMENT.FAILED` (verify the exact type in sandbox; `PAYMENT.SALE.DENIED` and `PAYMENT.SALE.DECLINED` are also handled - tick them too)
 - `PAYMENT.SALE.COMPLETED`
 - `PAYMENT.SALE.REFUNDED` / `PAYMENT.SALE.REVERSED` (fallback; see refunds below)
@@ -534,17 +535,29 @@ the rail event carries the subscription's state, not money.
   - `GET /store/paypal/subscriptions` - own subscriptions
   - `POST /store/paypal/subscriptions/:id/cancel` - cancel own subscription
   - `POST /store/paypal/subscriptions/:id/revise` with `{ "variant_id": "..." }` -
-    switch to another plan of the same product
+    switch to another plan of the same product; answers
+    `{ subscription, approval_url, pending }` and may need the buyer's consent
+    on PayPal before the switch takes effect
 - **Plan switch (customer self-service)**: revise calls PayPal
   `POST /v1/billing/subscriptions/{id}/revise`, so the subscription id, its
   approval and its billing history are untouched - no cancel-then-resubscribe.
-  Only an `ACTIVE` or `SUSPENDED` subscription can be revised, the target must
-  be a variant of the same product (a cross-product move is refused with a
-  readable error instead of PayPal's `PLAN_PRODUCT_NOT_COMPATIBLE`), and the
-  call carries a deterministic `PayPal-Request-Id` so a retry inside PayPal's
-  72h idempotency window reuses the same key instead of applying the change
-  twice. There is no proration: PayPal charges the new price from the next
-  billing cycle. Switching to the plan the customer is already on is a no-op.
+  PayPal treats a plan change as a **consent request**: the call answers 200
+  with an approval link and keeps billing the old plan until the buyer opens
+  it ("This type of update requires the buyer's consent"), so the endpoint
+  returns `{ subscription, approval_url, pending }` - `pending: true` means
+  nothing local has moved yet, send the buyer to `approval_url`, and the switch
+  lands on its own when PayPal reports it (the `BILLING.SUBSCRIPTION.UPDATED`
+  webhook, or the daily reconciliation pass as the safety net). `pending: false`
+  (no consent needed) already carries the new plan in `subscription`.
+  Only an `ACTIVE` subscription can be revised - a suspended one is refused
+  with a message telling the customer to resume first, because PayPal answers
+  `422 SUBSCRIPTION_STATUS_INVALID` for anything else. The target must be a
+  variant of the same product (a cross-product move is refused with a readable
+  error instead of PayPal's `PLAN_PRODUCT_NOT_COMPATIBLE`), and the call
+  carries a deterministic `PayPal-Request-Id` so a retry inside PayPal's 72h
+  idempotency window reuses the same key instead of applying the change twice.
+  There is no proration: PayPal charges the new price from the next billing
+  cycle. Switching to the plan the customer is already on is a no-op.
   The change is mirrored to the rail as a `status` transition carrying the new
   plan id and interval.
 - **One live subscription per product**: creating a subscription
