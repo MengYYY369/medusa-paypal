@@ -159,6 +159,7 @@ describe("createPaypalRail", () => {
     await expect(
       rail.binding.start({
         customerId: "cus_1",
+        providerId: "pp_paypal_paypal",
         returnUrl: "https://shop.test/return",
         cancelUrl: "https://shop.test/cancel",
       })
