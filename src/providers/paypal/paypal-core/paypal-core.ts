@@ -330,6 +330,71 @@ function assertAbsoluteHttpUrl(field: string, value: string): void {
   }
 }
 
+/**
+ * Maps one Medusa line item onto a PayPal purchase-unit item, enforcing the
+ * contract documented in README §6 before anything reaches the wire.
+ *
+ * `CartLineItemDTO` declares all three fields, but the session's `data.items[]`
+ * is assembled by hand on the way in, so a missing field used to escape as a
+ * bare `TypeError` from `undefined.toString()`, or as the literal string `"NaN"`
+ * in `unit_amount.value` - a PayPal 400 that is just as unhelpful to debug.
+ * Both surfaced to the storefront as a generic 500. Validating here covers every
+ * caller of `createOrder` at once, since this is the only place items are
+ * mapped.
+ */
+function toPaypalItem(
+  item: CartLineItemDTO,
+  index: number,
+  currency: string,
+  fractionDigits: number,
+): Item {
+  const title = typeof item.title === "string" ? item.title.trim() : "";
+
+  if (!title) {
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      `Invalid item at index ${index}: title is required`,
+    );
+  }
+
+  const readNumber = (value: unknown, field: string): number => {
+    const blank =
+      value === undefined ||
+      value === null ||
+      (typeof value === "string" && value.trim() === "");
+    const parsed = blank ? NaN : Number(value);
+
+    if (!Number.isFinite(parsed)) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `Invalid item "${title}": ${field} must be a number (got ${String(value)})`,
+      );
+    }
+
+    return parsed;
+  };
+
+  const quantity = readNumber(item.quantity, "quantity");
+
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      `Invalid item "${title}": quantity must be a positive whole number (got ${String(item.quantity)})`,
+    );
+  }
+
+  const unitPrice = readNumber(item.unit_price, "unit_price");
+
+  return {
+    name: title,
+    quantity: String(quantity),
+    unitAmount: {
+      currencyCode: currency,
+      value: formatPaypalAmount(unitPrice, fractionDigits),
+    },
+  };
+}
+
 export class PaypalService {
   /**
    * Environment this client was built for. Public because plan hashing must
@@ -437,15 +502,9 @@ export class PaypalService {
   }: PaypalCreateOrderInput): Promise<Order> {
     const ordersController = new OrdersController(this.client);
 
-    const paypalItems: Item[] =
-      items?.map((item) => ({
-        name: item.title,
-        quantity: item.quantity.toString(),
-        unitAmount: {
-          currencyCode: currency,
-          value: formatPaypalAmount(Number(item.unit_price), fractionDigits),
-        },
-      })) || [];
+    const paypalItems: Item[] = (items ?? []).map((item, index) =>
+      toPaypalItem(item, index, currency, fractionDigits),
+    );
 
     const hasItems = paypalItems.length > 0;
 

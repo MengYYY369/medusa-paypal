@@ -516,17 +516,24 @@ _**`### Planned` 下的条目代码尚未实现**，读到这里请勿当作已�
   absent) is reported `CANCELED` instead of throwing. Deleting a payment
   session can no longer take the cart down with it, which is what produced the
   production 500 `Could not delete all payment sessions`.
+- **purchase-unit items are validated where they are mapped** (#04): a missing
+  or blank `title`, a missing or non-numeric `unit_price`, and a `quantity`
+  that is not a positive whole number are each rejected with an `INVALID_DATA`
+  error naming the offending field and, for the title, the item's index. The
+  check lives in `createOrder`'s item mapping — the only place session items
+  become PayPal items — so it covers session initiation and both of
+  `authorizePayment`'s order-rebuild paths at once. Previously a missing
+  `quantity` escaped as a bare `TypeError` and a missing `unit_price` reached
+  PayPal as the literal string `"NaN"`, both surfacing as an opaque 500.
 
 ### Planned
 
-#### Fixed — #03, #04
+#### Fixed — #03
 
 - **approve link**: vaulted checkouts that receive `payer-action` instead of
   `approve` are now matched (both in `initiatePayment` and in
   `initiateSubscriptionSession`), eliminating the silently-missing
   `redirect_url`; the raw `links` are kept in the session data for storefronts.
-- **item contract**: missing `title` / `unit_price` (and non-numeric `quantity`)
-  raise a clear `INVALID_DATA` error naming the field instead of a generic 500.
 
 #### Changed — #05
 

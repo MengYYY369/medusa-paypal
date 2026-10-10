@@ -1,5 +1,6 @@
 import PaypalModuleService from "../service"
 import { PaypalService } from "../paypal-core/paypal-core"
+import { OrdersController } from "@paypal/paypal-server-sdk"
 import { MedusaError, PaymentSessionStatus } from "@medusajs/framework/utils"
 
 const loggerStub = {
@@ -363,6 +364,103 @@ describe("PaypalModuleService (baseline behavior)", () => {
       expect(result.status).toBe(PaymentSessionStatus.PENDING)
       expect(result.data?.id).toBe("ORDER-2")
       expect(result.data?.error).toBeDefined()
+    })
+  })
+
+  /**
+   * Every call site that forwards `items` funnels through the single mapping in
+   * `PaypalService.createOrder`, so one guard covers all three: session
+   * initiation and `authorizePayment`'s two order-rebuild paths (capture
+   * rejected, capture declined). These tests run the real mapping - only the
+   * SDK call is stubbed - and pin that a bad item is rejected with the field
+   * named, rather than as a `TypeError` or a literal `"NaN"` amount that PayPal
+   * answers with an opaque 400.
+   */
+  describe("item contract", () => {
+    let sdkCreateOrder: jest.SpyInstance
+
+    beforeEach(() => {
+      sdkCreateOrder = jest
+        .spyOn(OrdersController.prototype, "createOrder")
+        .mockResolvedValue({ result: { id: "ORDER-NEW" } } as never)
+    })
+
+    afterEach(() => {
+      sdkCreateOrder.mockRestore()
+    })
+
+    it("rejects an item without a unit_price when initiating the session", async () => {
+      const provider = createProvider()
+
+      await expect(
+        provider.initiatePayment({
+          amount: 1050,
+          currency_code: "usd",
+          context: { idempotency_key: "sess_1" },
+          data: { items: [{ title: "Pro Plan", quantity: 1 }] },
+        } as never)
+      ).rejects.toThrow('Invalid item "Pro Plan": unit_price must be a number')
+
+      expect(sdkCreateOrder).not.toHaveBeenCalled()
+    })
+
+    it("rejects an item without a title on the rebuild after a rejected capture", async () => {
+      const provider = createProvider()
+      jest
+        .spyOn(await clientOf(provider), "captureOrder")
+        .mockRejectedValue(
+          Object.assign(new Error("capture failed"), { body: "{}" }) as never
+        )
+
+      await expect(
+        provider.authorizePayment({
+          data: {
+            id: "ORDER-1",
+            amount: 1050,
+            currency_code: "usd",
+            status: "APPROVED",
+            items: [{ unit_price: 9.99, quantity: 1 }],
+          },
+          context: {},
+        } as never)
+      ).rejects.toThrow("Invalid item at index 0: title is required")
+
+      expect(sdkCreateOrder).not.toHaveBeenCalled()
+    })
+
+    it("rejects a fractional quantity on the rebuild after a declined capture", async () => {
+      const provider = createProvider()
+      jest.spyOn(await clientOf(provider), "captureOrder").mockResolvedValue({
+        id: "ORDER-1",
+        purchaseUnits: [
+          {
+            payments: {
+              captures: [
+                {
+                  status: "DECLINED",
+                  id: "CAP-1",
+                  amount: { value: "10.50", currencyCode: "USD" },
+                },
+              ],
+            },
+          },
+        ],
+      } as never)
+
+      await expect(
+        provider.authorizePayment({
+          data: {
+            id: "ORDER-1",
+            amount: 1050,
+            currency_code: "usd",
+            status: "APPROVED",
+            items: [{ title: "Pro Plan", unit_price: 9.99, quantity: 1.5 }],
+          },
+          context: {},
+        } as never)
+      ).rejects.toThrow("quantity must be a positive whole number")
+
+      expect(sdkCreateOrder).not.toHaveBeenCalled()
     })
   })
 

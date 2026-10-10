@@ -568,9 +568,11 @@ All amounts are Medusa major units. They are formatted for PayPal with the
 currency's own `decimal_digits` as reported by the currency module (`usd` →
 `9.99`, `jpy` → `1000`); the plugin never rescales a number.
 
-A missing `title` or `unit_price` is rejected with a clear error naming the
-missing field, not a generic 500 — every item in the session must carry both,
-or the payment session will not be created.
+A missing `title`, `unit_price` or `quantity` is rejected with a clear error
+naming the missing field, not a generic 500 — every item in the session must
+carry all three, or the payment session will not be created. A `quantity` that
+is not a positive whole number is rejected the same way: PayPal's own item
+contract requires one.
 
 A valid item:
 

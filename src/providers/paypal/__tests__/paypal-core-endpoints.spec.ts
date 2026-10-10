@@ -1,3 +1,5 @@
+import { OrdersController } from "@paypal/paypal-server-sdk";
+import { MedusaError } from "@medusajs/framework/utils";
 import { PaypalService } from "../paypal-core";
 
 /**
@@ -134,5 +136,66 @@ describe("paypal-core billing endpoint paths", () => {
     const [url, init] = await lastFetchCall();
     expect(url).toBe(`${sandboxBase}/v1/billing/subscriptions/I-2/suspend`);
     expect(JSON.parse(String(init.body))).toEqual({ reason: "Managed via Medusa" });
+  });
+});
+
+/**
+ * The purchase-unit item contract (README §6). `createOrder` is the only place
+ * session items are mapped, so its guard is what turns a missing field into a
+ * named error instead of a `TypeError` from `undefined.toString()` or a literal
+ * `"NaN"` in `unit_amount.value`. Orders go through the SDK's axios client
+ * rather than `global.fetch`, so these tests spy on the controller itself.
+ */
+describe("paypal-core purchase-unit items", () => {
+  let sdkCreateOrder: jest.SpyInstance;
+
+  const orderWith = (items: unknown) => ({
+    amount: 9.99,
+    currency: "USD",
+    fractionDigits: 2,
+    sessionId: "sess_1",
+    items: items as never,
+  });
+
+  const itemsOnTheWire = () =>
+    sdkCreateOrder.mock.calls[0][0].body.purchaseUnits[0].items;
+
+  beforeEach(() => {
+    sdkCreateOrder = jest
+      .spyOn(OrdersController.prototype, "createOrder")
+      .mockResolvedValue({ result: { id: "ORDER-1" } } as never);
+  });
+
+  afterEach(() => {
+    sdkCreateOrder.mockRestore();
+  });
+
+  it("maps a complete item onto the wire payload", async () => {
+    const client = makeClient();
+
+    await client.createOrder(
+      orderWith([{ title: "Pro Plan - Monthly", unit_price: 9.99, quantity: 1 }])
+    );
+
+    expect(itemsOnTheWire()).toEqual([
+      {
+        name: "Pro Plan - Monthly",
+        quantity: "1",
+        unitAmount: { currencyCode: "USD", value: "9.99" },
+      },
+    ]);
+  });
+
+  it("rejects an item without a title before the SDK is reached", async () => {
+    const client = makeClient();
+
+    await expect(
+      client.createOrder(orderWith([{ unit_price: 9.99, quantity: 1 }]))
+    ).rejects.toMatchObject({
+      type: MedusaError.Types.INVALID_DATA,
+      message: "Invalid item at index 0: title is required",
+    });
+
+    expect(sdkCreateOrder).not.toHaveBeenCalled();
   });
 });
