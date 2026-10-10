@@ -5,6 +5,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-10-10
+
+_来自 2026-09-21/22 源码审查工单（`.scratch/source-repo-fixes/issues` #01–#07），全部条目均已落地。_
+
+### Fixed
+
+- **empty credentials fail loudly instead of as a PayPal 401** (#01): every entry
+  point that builds a client asserts the resolved configuration first
+  (`assertPaypalConfigured`, throwing the named `PaypalNotConfiguredError`), so a
+  missing credential pair reads as "PayPal is not configured" instead of the
+  SDK's `Basic Og==` → 401. The shared helper is `resolvePaypalClient` (the
+  client-token route and the subscription-webhook route both go through it); the
+  rail's vault-binding path runs the same guard at its first call and maps it to
+  a 500 `unexpected_state`. There is deliberately **no** environment-variable
+  fallback: the host reads `PAYPAL_*` itself and passes the values in explicitly
+  (`medusa-config.ts`), and the admin settings page is the runtime layer.
+- **deletePayment tolerates the two session shapes that are not orders** (#02):
+  a native subscription session (`paypal_subscription_id` / `is_subscription`)
+  has its PayPal billing subscription cancelled best-effort — the cancel
+  endpoint is posted the reason `Abandoned checkout` and any failure is logged
+  rather than raised — and a session that never created an order (`data.id`
+  absent) is reported `CANCELED` instead of throwing. Deleting a payment
+  session can no longer take the cart down with it, which is what produced the
+  production 500 `Could not delete all payment sessions`.
+- **purchase-unit items are validated where they are mapped** (#04): a missing
+  or blank `title`, a missing or non-numeric `unit_price`, and a `quantity`
+  that is not a positive whole number are each rejected with an `INVALID_DATA`
+  error naming the offending field and, for the title, the item's index. The
+  check lives in `createOrder`'s item mapping — the only place session items
+  become PayPal items — so it covers session initiation and both of
+  `authorizePayment`'s order-rebuild paths at once. Previously a missing
+  `quantity` escaped as a bare `TypeError` and a missing `unit_price` reached
+  PayPal as the literal string `"NaN"`, both surfacing as an opaque 500.
+- **approve link**: vaulted checkouts that receive `payer-action` instead of
+  `approve` are now matched (both in `initiatePayment` and in
+  `initiateSubscriptionSession`), eliminating the silently-missing
+  `redirect_url`; the raw `links` are kept in the session data for storefronts.
+  The two call sites share the exported `extractApproveUrl` helper, so the
+  relation list lives in one place.
+- **a second live subscription for the same product is refused at checkout**
+  (#07, R5): the create route checks the buyer's live rows before creating
+  anything and answers 400 with `code: "SUBSCRIPTION_ALREADY_ACTIVE"`, naming
+  the product and the two ways forward (cancel it, or switch plans). Only
+  `ACTIVE` and `SUSPENDED` rows block — an `APPROVAL_PENDING` row is an
+  abandoned checkout and would trap the customer behind a subscription they
+  never approved — and a guest checkout has no customer to key on, so this is a
+  data-level guard against double-billing, not an identity check.
+- **the renewal date is recorded when a subscription activates** (#07):
+  `next_billing_at` is written in the same update as the status flip, from the
+  ACTIVATED webhook resource (which carries `billing_info`, so no extra PayPal
+  call) and from the subscription already fetched by `authorizePayment`'s
+  re-query. A missing `next_billing_time` is logged and the column is left
+  unset rather than filled with a guessed date; rows that were already ACTIVE
+  keep their value and are backfilled by the daily reconciliation.
+
+### Changed
+
+- **Dependencies**: `@mikro-orm/*` dev and peer dependencies moved from 6.4.3 to
+  exactly 6.6.14 to match the version embedded in Medusa 2.20, eliminating the
+  duplicate-copy `improper qualified name (too many dotted names)` cart 500.
+  **This plugin now requires Medusa 2.20** (or any host whose `@medusajs/deps`
+  already pins mikro-orm 6.6.14); on an older host the peer range will resolve
+  two mikro-orm copies again.
+
+### Added
+
+- **switch subscription in place** (#07): `POST /store/paypal/subscriptions/:id/revise`
+  with `{ variant_id }`, authenticated as the owning customer, sends PayPal
+  `POST /v1/billing/subscriptions/{id}/revise` and updates the row's variant,
+  plan, interval and locked amount in place — no cancel-then-resubscribe, and
+  the subscription id, its approval and its billing history are untouched. The
+  request carries a deterministic `PayPal-Request-Id` (`revise-<row>-<plan>`),
+  so a retry inside PayPal's 72h idempotency window reuses the same key
+  instead of applying the change twice. Switches are same-product only
+  (cross-product is refused with a readable error instead of PayPal's
+  `PLAN_PRODUCT_NOT_COMPATIBLE`), only an `ACTIVE` or `SUSPENDED` subscription
+  can be revised, PayPal's own refusal surfaces as a 400 with its message, and
+  switching to the plan the customer is already on is a no-op. There is no
+  proration: PayPal charges the new price from the next billing cycle. The
+  change is mirrored to the rail with `transition: "status"`, which carries the
+  new `plan_id` and interval.
+
 ## 0.10.0 — 2026-10-06
 
 ### Breaking
@@ -491,89 +573,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the actual rejection reason. State-class no-ops still converge to success
   idempotently (unchanged).
 
-## [Unreleased]
-
-_以下条目来自 2026-09-21/22 源码审查工单（`.scratch/source-repo-fixes/issues` #01–#07）。_
-_全部条目均已落地；`### Planned` 段已随 #07 关闭而删除。_
-
-### Fixed
-
-- **empty credentials fail loudly instead of as a PayPal 401** (#01): every entry
-  point that builds a client asserts the resolved configuration first
-  (`assertPaypalConfigured`, throwing the named `PaypalNotConfiguredError`), so a
-  missing credential pair reads as "PayPal is not configured" instead of the
-  SDK's `Basic Og==` → 401. The shared helper is `resolvePaypalClient` (the
-  client-token route and the subscription-webhook route both go through it); the
-  rail's vault-binding path runs the same guard at its first call and maps it to
-  a 500 `unexpected_state`. There is deliberately **no** environment-variable
-  fallback: the host reads `PAYPAL_*` itself and passes the values in explicitly
-  (`medusa-config.ts`), and the admin settings page is the runtime layer.
-- **deletePayment tolerates the two session shapes that are not orders** (#02):
-  a native subscription session (`paypal_subscription_id` / `is_subscription`)
-  has its PayPal billing subscription cancelled best-effort — the cancel
-  endpoint is posted the reason `Abandoned checkout` and any failure is logged
-  rather than raised — and a session that never created an order (`data.id`
-  absent) is reported `CANCELED` instead of throwing. Deleting a payment
-  session can no longer take the cart down with it, which is what produced the
-  production 500 `Could not delete all payment sessions`.
-- **purchase-unit items are validated where they are mapped** (#04): a missing
-  or blank `title`, a missing or non-numeric `unit_price`, and a `quantity`
-  that is not a positive whole number are each rejected with an `INVALID_DATA`
-  error naming the offending field and, for the title, the item's index. The
-  check lives in `createOrder`'s item mapping — the only place session items
-  become PayPal items — so it covers session initiation and both of
-  `authorizePayment`'s order-rebuild paths at once. Previously a missing
-  `quantity` escaped as a bare `TypeError` and a missing `unit_price` reached
-  PayPal as the literal string `"NaN"`, both surfacing as an opaque 500.
-- **approve link**: vaulted checkouts that receive `payer-action` instead of
-  `approve` are now matched (both in `initiatePayment` and in
-  `initiateSubscriptionSession`), eliminating the silently-missing
-  `redirect_url`; the raw `links` are kept in the session data for storefronts.
-  The two call sites share the exported `extractApproveUrl` helper, so the
-  relation list lives in one place.
-- **a second live subscription for the same product is refused at checkout**
-  (#07, R5): the create route checks the buyer's live rows before creating
-  anything and answers 400 with `code: "SUBSCRIPTION_ALREADY_ACTIVE"`, naming
-  the product and the two ways forward (cancel it, or switch plans). Only
-  `ACTIVE` and `SUSPENDED` rows block — an `APPROVAL_PENDING` row is an
-  abandoned checkout and would trap the customer behind a subscription they
-  never approved — and a guest checkout has no customer to key on, so this is a
-  data-level guard against double-billing, not an identity check.
-- **the renewal date is recorded when a subscription activates** (#07):
-  `next_billing_at` is written in the same update as the status flip, from the
-  ACTIVATED webhook resource (which carries `billing_info`, so no extra PayPal
-  call) and from the subscription already fetched by `authorizePayment`'s
-  re-query. A missing `next_billing_time` is logged and the column is left
-  unset rather than filled with a guessed date; rows that were already ACTIVE
-  keep their value and are backfilled by the daily reconciliation.
-
-### Changed
-
-- **Dependencies**: `@mikro-orm/*` dev and peer dependencies moved from 6.4.3 to
-  exactly 6.6.14 to match the version embedded in Medusa 2.20, eliminating the
-  duplicate-copy `improper qualified name (too many dotted names)` cart 500.
-  **This plugin now requires Medusa 2.20** (or any host whose `@medusajs/deps`
-  already pins mikro-orm 6.6.14); on an older host the peer range will resolve
-  two mikro-orm copies again.
-
-### Added
-
-- **switch subscription in place** (#07): `POST /store/paypal/subscriptions/:id/revise`
-  with `{ variant_id }`, authenticated as the owning customer, sends PayPal
-  `POST /v1/billing/subscriptions/{id}/revise` and updates the row's variant,
-  plan, interval and locked amount in place — no cancel-then-resubscribe, and
-  the subscription id, its approval and its billing history are untouched. The
-  request carries a deterministic `PayPal-Request-Id` (`revise-<row>-<plan>`),
-  so a retry inside PayPal's 72h idempotency window reuses the same key
-  instead of applying the change twice. Switches are same-product only
-  (cross-product is refused with a readable error instead of PayPal's
-  `PLAN_PRODUCT_NOT_COMPATIBLE`), only an `ACTIVE` or `SUSPENDED` subscription
-  can be revised, PayPal's own refusal surfaces as a 400 with its message, and
-  switching to the plan the customer is already on is a no-op. There is no
-  proration: PayPal charges the new price from the next billing cycle. The
-  change is mirrored to the rail with `transition: "status"`, which carries the
-  new `plan_id` and interval.
-
 ## [0.5.0] - 2026-09-22
 
 ### Changed — BREAKING: money units
@@ -595,7 +594,7 @@ _全部条目均已落地；`### Planned` 段已随 #07 关闭而删除。_
   total = storefront display.
 - Compatibility is unchanged here: the package still declares
   `@mikro-orm/*` **6.4.3** peers (the 6.6.14 alignment is still unreleased, see
-  `[Unreleased]`), and requires Medusa 2.20.
+  `[0.10.1]`), and requires Medusa 2.20.
 
 ### Fixed
 
