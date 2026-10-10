@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.6] - 2026-10-10
+
+_0.10.5 上线后的生产回归发现：对 `APPROVAL_PENDING`（买家从未在 PayPal 同意过）的订阅行调
+`POST /store/paypal/subscriptions/:id/cancel` 返回 500。原因是这类订阅在 PayPal 侧根本不存在
+（同意链接过期或从未打开），`POST /v1/billing/subscriptions/{id}/cancel` 答
+`404 INVALID_RESOURCE_ID`，插件把它当未知错误抛出 —— 于是这条待批准行永远清不掉，
+后台与直调 API 都没有出路。_
+
+### Fixed
+
+- **取消从未批准的订阅不再 500**：`requestLifecycleAction` 在 `action === "cancel"`、PayPal 返回
+  404 且本地行仍是 `APPROVAL_PENDING` 时，视为「PayPal 侧无此订阅」，直接把本地行置
+  `CANCELLED` 并 warn 记录。其他状态下的 404 仍然照抛 —— 那属于真漂移（环境错、订阅被删），
+  必须响亮。
+
+### Tests
+
+- 新增 2 例：未批准行遇 404 清账并发出 rail 事件；已批准行遇 404 仍抛错且不改行。
+
 ## [0.10.5] - 2026-10-10
 
 _0.10.4 上线后在真实生产复验时发现：归属兜底写的「payment session → cart 链接 → cart」这条

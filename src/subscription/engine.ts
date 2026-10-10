@@ -1665,7 +1665,7 @@ export class SubscriptionEngine {
     row: SubscriptionRow,
     action: "cancel" | "suspend" | "resume"
   ): Promise<SubscriptionRow> {
-    const { client } = this.deps;
+    const { client, logger } = this.deps;
 
     const targetStatus: PaypalSubscriptionStatus =
       action === "cancel" ? "CANCELLED" : action === "suspend" ? "SUSPENDED" : "ACTIVE";
@@ -1681,7 +1681,31 @@ export class SubscriptionEngine {
       );
     } catch (error: any) {
       // PayPal rejects no-op transitions (422); treat them as converged.
-      if (error?.paypalStatus !== 422) {
+      const converged = error?.paypalStatus === 422;
+
+      /**
+       * A subscription the buyer never approved has no resource on PayPal's
+       * side: the approve link expired, or it was never opened, and
+       * `POST /v1/billing/subscriptions/{id}/cancel` answers 404
+       * INVALID_RESOURCE_ID (confirmed against production on 2026-10-10).
+       * There is nothing to cancel over there, so the local row is the only
+       * place the pending subscription can be cleared - throwing would leave
+       * it stuck forever. Restricted to APPROVAL_PENDING on purpose: for any
+       * other status a 404 means real drift (wrong environment, deleted
+       * subscription) and must stay loud.
+       */
+      const nothingOnPaypal =
+        action === "cancel" &&
+        error?.paypalStatus === 404 &&
+        row.status === "APPROVAL_PENDING";
+
+      if (nothingOnPaypal) {
+        logger.warn(
+          `Subscription ${row.id} (${row.paypal_subscription_id}) is not on PayPal (${
+            error?.paypalIssue ?? "404"
+          }); clearing the never-approved row locally.`
+        );
+      } else if (!converged) {
         throw error;
       }
     }

@@ -597,7 +597,9 @@ the rail event carries the subscription's state, not money.
   `payment_failed`). The `paypal.subscription.*` names this package used to
   emit are gone as of 0.10.0.
 - **Cancellation semantics** are PayPal's: future charges stop immediately,
-  paid periods keep their entitlements until period end.
+  paid periods keep their entitlements until period end. A row that is still
+  `APPROVAL_PENDING` - the buyer never opened the approve link - does not exist
+  on PayPal's side, so cancelling it clears the local row instead of failing.
 - **Reconciliation**: a daily job (cron overridable via
   `PAYPAL_SUBSCRIPTION_RECONCILE_CRON`, default `0 3 * * *`) aligns local
   status with PayPal and backfills missed sales / never-completed first

@@ -1311,6 +1311,52 @@ describe("lifecycle actions", () => {
     await h.engine.customerCancel(row[0], "cus_1");
     expect(h.module.subscriptions[0].status).toBe("CANCELLED");
   });
+
+  it("clears a never-approved row when PayPal has no such subscription (404)", async () => {
+    // A subscription the buyer never approved has no resource on PayPal's
+    // side, so cancel answers 404 INVALID_RESOURCE_ID. The local row is the
+    // only place that pending subscription can be cleared.
+    const h = makeHarness({
+      client: makeClient({
+        subscriptionAction: jest.fn().mockRejectedValue(
+          Object.assign(
+            new Error(
+              "PayPal POST /v1/billing/subscriptions/I-ABC123/cancel failed (404): The specified resource does not exist. [INVALID_RESOURCE_ID]"
+            ),
+            { paypalStatus: 404, paypalIssue: "INVALID_RESOURCE_ID" }
+          )
+        ),
+      }),
+    });
+    const row = await h.module.createPaypalSubscriptions(
+      makeRow({ status: "APPROVAL_PENDING", customer_id: "cus_1" })
+    );
+
+    await h.engine.customerCancel(row[0], "cus_1");
+
+    expect(h.module.subscriptions[0].status).toBe("CANCELLED");
+    expect(h.rail.payloads[0]).toMatchObject({ status: "cancelled", transition: "status" });
+  });
+
+  it("keeps a 404 on an approved row loud (real drift, not a pending row)", async () => {
+    const h = makeHarness({
+      client: makeClient({
+        subscriptionAction: jest.fn().mockRejectedValue(
+          Object.assign(new Error("PayPal cancel failed (404)"), {
+            paypalStatus: 404,
+            paypalIssue: "INVALID_RESOURCE_ID",
+          })
+        ),
+      }),
+    });
+    const row = await h.module.createPaypalSubscriptions(makeRow({ status: "ACTIVE" }));
+
+    await expect(h.engine.requestLifecycleAction(row[0], "cancel")).rejects.toThrow(
+      /404/
+    );
+    expect(h.module.subscriptions[0].status).toBe("ACTIVE");
+    expect(h.rail.payloads).toHaveLength(0);
+  });
 });
 
 describe("plan switch (revise)", () => {
