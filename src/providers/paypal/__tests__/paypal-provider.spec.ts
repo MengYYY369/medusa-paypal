@@ -771,6 +771,60 @@ describe("PaypalModuleService (vault save + off-session charges)", () => {
       )
     })
 
+    it("falls back to the payer-action link for a vaulted order", async () => {
+      const provider = createProvider()
+      const links = [
+        {
+          rel: "self",
+          href: "https://api-m.sandbox.paypal.com/orders/PAYPAL-1",
+        },
+        {
+          rel: "payer-action",
+          href: "https://www.sandbox.paypal.com/payer-action?token=PAYPAL-1",
+        },
+      ]
+      jest
+        .spyOn(await clientOf(provider), "createOrder")
+        .mockResolvedValue({ id: "PAYPAL-1", status: "CREATED", links } as never)
+
+      const result = await provider.initiatePayment({
+        amount: 1050,
+        currency_code: "usd",
+        context: {},
+        data: { customer_id: "cus_1" },
+      } as never)
+
+      expect(result.data?.redirect_url).toBe(
+        "https://www.sandbox.paypal.com/payer-action?token=PAYPAL-1"
+      )
+      // The raw links ride along in the session data (the `...order` spread),
+      // so a storefront can read a relation the plugin does not model.
+      expect(result.data?.links).toEqual(links)
+    })
+
+    it("leaves redirect_url unset when PayPal offers neither approval link", async () => {
+      const provider = createProvider()
+      jest.spyOn(await clientOf(provider), "createOrder").mockResolvedValue({
+        id: "PAYPAL-1",
+        status: "CREATED",
+        links: [
+          {
+            rel: "self",
+            href: "https://api-m.sandbox.paypal.com/orders/PAYPAL-1",
+          },
+        ],
+      } as never)
+
+      const result = await provider.initiatePayment({
+        amount: 1050,
+        currency_code: "usd",
+        context: {},
+        data: {},
+      } as never)
+
+      expect(result.data?.redirect_url).toBeUndefined()
+    })
+
     it("creates an account holder keyed to the Medusa customer id", async () => {
       const provider = createProvider()
 

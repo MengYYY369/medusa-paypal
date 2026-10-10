@@ -35,7 +35,7 @@ import {
   PaymentTokenResponse,
 } from "@paypal/paypal-server-sdk";
 import { WebhookPayload } from "./types";
-import { PaypalCreateOrderInput, PaypalService } from "./paypal-core";
+import { extractApproveUrl, PaypalCreateOrderInput, PaypalService } from "./paypal-core";
 import {
   SubscriptionEngine,
   SubscriptionEngineModules,
@@ -971,8 +971,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
         cancel_url: typeof data?.cancel_url === "string" ? data.cancel_url : undefined,
       });
 
-      const approveLink = order.links?.find((link) => link.rel === "approve")
-        ?.href;
+      const approveLink = extractApproveUrl(order.links);
 
       return {
         data: {

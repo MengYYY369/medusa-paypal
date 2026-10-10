@@ -294,11 +294,20 @@ async function callVaultApi<T>(
 }
 
 /**
- * Approval link of a setup token. The sandbox harness reads `approve` first
- * and falls back to `payer-action`; both relations appear in live responses.
+ * Approval link of an order, setup token or subscription. PayPal answers with
+ * `approve` on some flows and `payer-action` on others - vaulted checkouts and
+ * subscriptions are the ones that tend to come back as `payer-action` - so
+ * both relations are accepted. Reading only `approve` silently dropped the
+ * redirect URL and left the storefront with no way to send the buyer to
+ * PayPal, which is why every caller shares this helper instead of matching the
+ * relation itself.
+ *
+ * Only `rel` and `href` are read, so the parameter stays structural: the
+ * subscription engine talks to a hand-rolled client interface whose links are
+ * not the SDK's `LinkDescription`.
  */
-function extractApproveUrl(
-  links: LinkDescription[] | undefined,
+export function extractApproveUrl(
+  links: Array<{ rel?: string; href?: string }> | undefined,
 ): string | undefined {
   const link =
     links?.find((candidate) => candidate.rel === "approve") ??

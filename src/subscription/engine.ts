@@ -3,6 +3,7 @@ import { Logger, WebhookActionResult } from "@medusajs/framework/types";
 import {
   PaypalService,
   PaypalBillingCycleInput,
+  extractApproveUrl,
   formatPaypalAmount,
 } from "../providers/paypal/paypal-core/paypal-core";
 import { getPaypalFractionDigits } from "../lib/currency-digits";
@@ -565,9 +566,7 @@ export class SubscriptionEngine {
       ...(cancelUrl && { cancel_url: cancelUrl }),
     });
 
-    const approveLink = subscription.links?.find(
-      (link) => link.rel === "approve"
-    )?.href;
+    const approveLink = extractApproveUrl(subscription.links);
 
     const paymentModule = this.deps.paymentModule;
     let providerId: string | null = null;

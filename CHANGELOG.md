@@ -525,15 +525,14 @@ _**`### Planned` 下的条目代码尚未实现**，读到这里请勿当作已�
   `authorizePayment`'s order-rebuild paths at once. Previously a missing
   `quantity` escaped as a bare `TypeError` and a missing `unit_price` reached
   PayPal as the literal string `"NaN"`, both surfacing as an opaque 500.
-
-### Planned
-
-#### Fixed — #03
-
 - **approve link**: vaulted checkouts that receive `payer-action` instead of
   `approve` are now matched (both in `initiatePayment` and in
   `initiateSubscriptionSession`), eliminating the silently-missing
   `redirect_url`; the raw `links` are kept in the session data for storefronts.
+  The two call sites share the exported `extractApproveUrl` helper, so the
+  relation list lives in one place.
+
+### Planned
 
 #### Changed — #05
 

@@ -320,6 +320,37 @@ describe("session initiation", () => {
     expect(result.approveLink).toBe("https://www.paypal.com/approve");
   });
 
+  it("falls back to the payer-action link when PayPal omits approve", async () => {
+    const payerActionUrl =
+      "https://www.paypal.com/payer-action?token=I-NEW";
+    const h = makeHarness({
+      client: makeClient({
+        createSubscription: jest.fn().mockResolvedValue({
+          id: "I-NEW",
+          status: "APPROVAL_PENDING",
+          links: [
+            {
+              rel: "self",
+              href: "https://api-m.paypal.com/v1/billing/subscriptions/I-NEW",
+            },
+            { rel: "payer-action", href: payerActionUrl },
+          ],
+        }),
+      }),
+    });
+
+    const result = await h.engine.initiateSubscriptionSession({
+      sessionId: "sess_1",
+      variantId: "variant_1",
+      currencyCode: "usd",
+      amount: 19.99,
+      customerId: "cus_1",
+    });
+
+    expect(result.approveLink).toBe(payerActionUrl);
+    expect((result.row.metadata as any)?.approve_link).toBe(payerActionUrl);
+  });
+
   it("is idempotent per session (Buttons route cannot double-create)", async () => {
     const h = makeHarness();
 
