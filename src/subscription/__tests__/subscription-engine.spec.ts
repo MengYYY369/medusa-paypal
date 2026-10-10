@@ -646,6 +646,50 @@ describe("webhook: BILLING.SUBSCRIPTION.ACTIVATED", () => {
   });
 });
 
+describe("webhook: BILLING.SUBSCRIPTION.RE-ACTIVATED (resume)", () => {
+  it("flips a SUSPENDED row back to ACTIVE and carries the renewal date", async () => {
+    const h = makeHarness();
+    await h.module.createPaypalSubscriptions(makeRow({ status: "SUSPENDED" }));
+
+    const result = await h.engine.handleWebhookEvent(
+      "BILLING.SUBSCRIPTION.RE-ACTIVATED",
+      { id: "I-ABC123", billing_info: { next_billing_time: "2026-11-10T00:00:00Z" } }
+    );
+
+    expect(result).toEqual({ action: "not_supported" });
+    expect(h.module.subscriptions[0].status).toBe("ACTIVE");
+    expect(h.module.subscriptions[0].next_billing_at).toEqual(
+      new Date("2026-11-10T00:00:00Z")
+    );
+    expect(h.rail.payloads).toEqual([
+      expect.objectContaining({ status: "active", transition: "status" }),
+    ]);
+  });
+
+  it("is a no-op when the row is already ACTIVE", async () => {
+    const h = makeHarness();
+    await h.module.createPaypalSubscriptions(makeRow({ status: "ACTIVE" }));
+
+    await h.engine.handleWebhookEvent("BILLING.SUBSCRIPTION.RE-ACTIVATED", {
+      id: "I-ABC123",
+    });
+
+    expect(h.rail.payloads).toHaveLength(0);
+  });
+
+  it("ignores unknown subscriptions", async () => {
+    const h = makeHarness();
+
+    const result = await h.engine.handleWebhookEvent(
+      "BILLING.SUBSCRIPTION.RE-ACTIVATED",
+      { id: "I-UNKNOWN" }
+    );
+
+    expect(result).toEqual({ action: "not_supported" });
+    expect(h.rail.payloads).toHaveLength(0);
+  });
+});
+
 describe("webhook: BILLING.SUBSCRIPTION.UPDATED (consented plan switch)", () => {
   const monthly = makeVariant({ product_id: "prod_1" });
   const yearly = makeVariant({

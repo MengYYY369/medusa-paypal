@@ -856,7 +856,13 @@ export class SubscriptionEngine {
 
     switch (eventType) {
       case "BILLING.SUBSCRIPTION.ACTIVATED":
-        await this.onSubscriptionActivated(resource);
+        await this.onSubscriptionActivated(resource, eventType);
+        return { action: "not_supported" };
+      case "BILLING.SUBSCRIPTION.RE-ACTIVATED":
+        // Same shape as ACTIVATED - a suspended subscription PayPal switched
+        // back on. Until 0.10.3 this fell through to `default` and the row sat
+        // SUSPENDED until the nightly reconcile caught up.
+        await this.onSubscriptionActivated(resource, eventType);
         return { action: "not_supported" };
       case "BILLING.SUBSCRIPTION.SUSPENDED":
         await this.syncSubscriptionStatus(resource?.id, "SUSPENDED");
@@ -906,12 +912,15 @@ export class SubscriptionEngine {
    * with the status flip, which is what puts `next_billing_at` into the rail
    * event the host mirrors as the customer's next charge day.
    */
-  private async onSubscriptionActivated(resource: any): Promise<void> {
+  private async onSubscriptionActivated(
+    resource: any,
+    eventType = "BILLING.SUBSCRIPTION.ACTIVATED"
+  ): Promise<void> {
     const row = await this.findRowByPaypalId(resource?.id);
 
     if (!row) {
       this.deps.logger.warn(
-        `BILLING.SUBSCRIPTION.ACTIVATED for unknown subscription ${resource?.id}; ignoring`
+        `${eventType} for unknown subscription ${resource?.id}; ignoring`
       );
       return;
     }

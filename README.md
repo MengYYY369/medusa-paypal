@@ -413,6 +413,7 @@ https://<your-backend>/hooks/paypal/subscriptions
 Subscribe it to these event types only:
 
 - `BILLING.SUBSCRIPTION.ACTIVATED`
+- `BILLING.SUBSCRIPTION.RE-ACTIVATED` (a suspended subscription switched back on; without it a resume only lands via the nightly reconcile)
 - `BILLING.SUBSCRIPTION.SUSPENDED`
 - `BILLING.SUBSCRIPTION.CANCELLED`
 - `BILLING.SUBSCRIPTION.EXPIRED`

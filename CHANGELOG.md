@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.3] - 2026-10-10
+
+_订阅 webhook 在 2026-10-10 被补上了 `BILLING.SUBSCRIPTION.RE-ACTIVATED`（此前宿主侧未勾选，插件侧也无分支）。插件侧补分支是因为：买家在 PayPal 侧自行恢复订阅（或在 PayPal 重试扣款成功后由 PayPal 自动恢复）时，此前事件落进 `switch` 的 `default`，只回一句 `not_supported`，本地行会一直停在 `SUSPENDED` —— 前台显示“已暂停”、续费日为空，直到第二天凌晨的 `reconcile()` 才被拉回 `ACTIVE`。_
+
+### Fixed
+
+- **恢复订阅（resume）由 webhook 即时落库**：新增 `BILLING.SUBSCRIPTION.RE-ACTIVATED` 分支，与
+  `ACTIVATED` 共用 `onSubscriptionActivated(resource, eventType)` —— 该函数本就覆盖
+  `SUSPENDED → ACTIVE`（连同 `backfillNextBillingAt`），所以恢复时同一次写库带上事件自带的
+  `billing_info.next_billing_time`，并只发一次 `transition: "status"` 的 rail 事件。
+  已 `ACTIVE` 的行不受影响（不重复发事件），未知订阅只 warn。
+  **注意与后台手动恢复的区别**：管理端 `requestLifecycleAction(row, "resume")` 是“先改 PayPal、
+  再改本地行”，事件到达时本地已是 `ACTIVE`，因此不会多发事件；本分支覆盖的是
+  **买家侧/ PayPal 侧**发起的恢复。
+- **日志文案按事件名区分**：`onSubscriptionActivated` 现在把收到的 `eventType` 写进 warn，
+  此前 RE-ACTIVATED 的未知订阅日志会误写成 `BILLING.SUBSCRIPTION.ACTIVATED`。
+- **宿主侧配置**：订阅 webhook（`subscriptionWebhookId`）需勾选 `BILLING.SUBSCRIPTION.RE-ACTIVATED`，
+  否则恢复仍只能靠每日对账；README 的 webhook 事件清单已补该条。
+
+### Tests
+
+- 新增 `webhook: BILLING.SUBSCRIPTION.RE-ACTIVATED (resume)` 三例：`SUSPENDED → ACTIVE`
+  且续费日随事件落地并发一次 rail 事件；行已是 `ACTIVE` 时不发事件；未知订阅只 warn。
+
 ## [0.10.2] - 2026-10-10
 
 _来自 2026-10-10 的 PayPal 沙箱实测（`.scratch/paypal-subscriptions/sandbox-plan-switch-2026-10-10.md`）：0.10.1 的改签实现把 PayPal 的「改签需买家同意」当成了同步生效，本地行在买家还没点同意时就已经改成了新计划。_
