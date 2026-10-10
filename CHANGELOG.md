@@ -532,14 +532,16 @@ _**`### Planned` 下的条目代码尚未实现**，读到这里请勿当作已�
   The two call sites share the exported `extractApproveUrl` helper, so the
   relation list lives in one place.
 
-### Planned
+### Changed
 
-#### Changed — #05
-
-- **Dependencies**: `@mikro-orm/*` dev and peer dependencies from 6.4.3 to
+- **Dependencies**: `@mikro-orm/*` dev and peer dependencies moved from 6.4.3 to
   exactly 6.6.14 to match the version embedded in Medusa 2.20, eliminating the
   duplicate-copy `improper qualified name (too many dotted names)` cart 500.
-  **Not yet done — this release still declares 6.4.3.**
+  **This plugin now requires Medusa 2.20** (or any host whose `@medusajs/deps`
+  already pins mikro-orm 6.6.14); on an older host the peer range will resolve
+  two mikro-orm copies again.
+
+### Planned
 
 #### Added — #07
 
