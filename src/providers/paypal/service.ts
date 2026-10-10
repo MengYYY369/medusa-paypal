@@ -1071,7 +1071,33 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
     }
   }
 
+  /**
+   * Cancels whatever remote object the session created. Two session shapes are
+   * not plain orders, and failing them bricked the whole cart in production
+   * (MP-1: the 500 was Medusa core's `Could not delete all payment sessions`,
+   * raised because this method threw):
+   *
+   * - A native subscription session carries `paypal_subscription_id` (and
+   *   `is_subscription`) instead of an order id. Its billing subscription is
+   *   cancelled best-effort: the customer abandoned the approval page, so the
+   *   resource is frequently already gone at PayPal (404
+   *   `INVALID_RESOURCE_ID` for an unapproved subscription) and the local
+   *   delete must not block on that.
+   * - A session that never created an order at all (`data.id` absent) has
+   *   nothing remote to void. Having nothing to delete is not an error.
+   *
+   * The subscription cancel goes straight to the billing client instead of the
+   * subscription engine's `requestLifecycleAction`: that path owns rows that
+   * exist and emits customer-facing cancellation events, while this is
+   * pre-approval cleanup - and the provider stays usable on hosts that never
+   * register the subscription module. The two paths are told apart by their
+   * PayPal-visible reason: engine cancellations say "Managed via Medusa",
+   * abandoned-checkout cleanups say "Abandoned checkout".
+   */
   async deletePayment(input: DeletePaymentInput): Promise<DeletePaymentOutput> {
+    const nonEmptyString = (value: unknown): string | undefined =>
+      typeof value === "string" && value ? value : undefined;
+
     try {
       if (!input.data) {
         throw new MedusaError(
@@ -1080,13 +1106,51 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
         );
       }
 
-      const orderId = input.data["id"] as string;
+      const sessionData = input.data as Record<string, unknown>;
+
+      const subscriptionId =
+        nonEmptyString(sessionData.paypal_subscription_id) ??
+        (sessionData.is_subscription === true
+          ? nonEmptyString(sessionData.id)
+          : undefined);
+
+      if (subscriptionId) {
+        try {
+          const client = await this.getClient();
+
+          await client.subscriptionAction(
+            subscriptionId,
+            "cancel",
+            "Abandoned checkout"
+          );
+        } catch (cancelError) {
+          // Best effort by design: an unapproved subscription expires on its
+          // own, and a delete that throws here takes the cart down with it.
+          this.logger.warn(
+            `PayPal subscription cancel during delete skipped (${subscriptionId}): ${String(
+              cancelError
+            )}`
+          );
+        }
+
+        return {
+          data: {
+            subscription_id: subscriptionId,
+            status: PaymentSessionStatus.CANCELED,
+            cancelled_at: new Date().toISOString(),
+          },
+        };
+      }
+
+      const orderId = nonEmptyString(sessionData.id);
 
       if (!orderId) {
-        throw new MedusaError(
-          MedusaError.Types.INVALID_DATA,
-          "Delete payment failed! PayPal order ID and capture ID is required to cancel payment"
-        );
+        return {
+          data: {
+            status: PaymentSessionStatus.CANCELED,
+            cancelled_at: new Date().toISOString(),
+          },
+        };
       }
 
       return {

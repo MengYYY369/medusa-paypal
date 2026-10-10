@@ -122,6 +122,123 @@ describe("PaypalModuleService (baseline behavior)", () => {
     })
   })
 
+  describe("deletePayment", () => {
+    it("cancels the billing subscription of an abandoned native session", async () => {
+      const provider = createProvider()
+      const cancelSpy = jest
+        .spyOn(await clientOf(provider), "subscriptionAction")
+        .mockResolvedValue(undefined as never)
+
+      const result = await provider.deletePayment({
+        data: { is_subscription: true, paypal_subscription_id: "I-ABANDONED" },
+      } as never)
+
+      expect(cancelSpy).toHaveBeenCalledWith(
+        "I-ABANDONED",
+        "cancel",
+        "Abandoned checkout"
+      )
+      expect(result.data).toMatchObject({
+        subscription_id: "I-ABANDONED",
+        status: PaymentSessionStatus.CANCELED,
+      })
+    })
+
+    it("falls back to the session id when only the subscription flag is set", async () => {
+      const provider = createProvider()
+      const cancelSpy = jest
+        .spyOn(await clientOf(provider), "subscriptionAction")
+        .mockResolvedValue(undefined as never)
+
+      await provider.deletePayment({
+        data: { is_subscription: true, id: "I-FROM-ID" },
+      } as never)
+
+      expect(cancelSpy).toHaveBeenCalledWith(
+        "I-FROM-ID",
+        "cancel",
+        "Abandoned checkout"
+      )
+    })
+
+    it("swallows an already-gone subscription and still reports cancelled", async () => {
+      const provider = createProvider()
+      loggerStub.warn.mockClear()
+      jest
+        .spyOn(await clientOf(provider), "subscriptionAction")
+        .mockRejectedValue(
+          Object.assign(new Error("The requested resource was not found."), {
+            statusCode: 404,
+            body: JSON.stringify({ name: "INVALID_RESOURCE_ID" }),
+          })
+        )
+
+      const result = await provider.deletePayment({
+        data: { is_subscription: true, paypal_subscription_id: "I-GONE" },
+      } as never)
+
+      expect(result.data).toMatchObject({
+        subscription_id: "I-GONE",
+        status: PaymentSessionStatus.CANCELED,
+      })
+      expect(loggerStub.warn).toHaveBeenCalledWith(
+        expect.stringContaining("I-GONE")
+      )
+    })
+
+    it("does not let a PayPal outage block the session delete", async () => {
+      const provider = createProvider()
+      jest
+        .spyOn(await clientOf(provider), "subscriptionAction")
+        .mockRejectedValue(new Error("socket hang up"))
+
+      await expect(
+        provider.deletePayment({
+          data: { is_subscription: true, paypal_subscription_id: "I-NET" },
+        } as never)
+      ).resolves.toMatchObject({
+        data: { status: PaymentSessionStatus.CANCELED },
+      })
+    })
+
+    it("reports cancelled without a PayPal call when no order was ever created", async () => {
+      const provider = createProvider()
+      const cancelSpy = jest
+        .spyOn(await clientOf(provider), "subscriptionAction")
+        .mockRejectedValue(new Error("must not be called"))
+
+      const result = await provider.deletePayment({ data: {} } as never)
+
+      expect(cancelSpy).not.toHaveBeenCalled()
+      expect(result.data).toMatchObject({
+        status: PaymentSessionStatus.CANCELED,
+      })
+      expect(result.data).not.toHaveProperty("order_id")
+    })
+
+    it("reports the order cancelled for a plain order session", async () => {
+      const provider = createProvider()
+
+      const result = await provider.deletePayment({
+        data: { id: "ORDER-1" },
+      } as never)
+
+      expect(result.data).toMatchObject({
+        order_id: "ORDER-1",
+        status: PaymentSessionStatus.CANCELED,
+      })
+    })
+
+    it("still requires session data", async () => {
+      const provider = createProvider()
+
+      await expect(provider.deletePayment({} as never)).rejects.toMatchObject({
+        type: MedusaError.Types.INVALID_DATA,
+        message: expect.stringContaining("Payment data is required"),
+      })
+    })
+  })
+
   describe("capturePayment", () => {
     it("returns captured without an API call when already completed", async () => {
       const provider = createProvider()

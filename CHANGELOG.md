@@ -508,17 +508,19 @@ _**`### Planned` 下的条目代码尚未实现**，读到这里请勿当作已�
   a 500 `unexpected_state`. There is deliberately **no** environment-variable
   fallback: the host reads `PAYPAL_*` itself and passes the values in explicitly
   (`medusa-config.ts`), and the admin settings page is the runtime layer.
+- **deletePayment tolerates the two session shapes that are not orders** (#02):
+  a native subscription session (`paypal_subscription_id` / `is_subscription`)
+  has its PayPal billing subscription cancelled best-effort — the cancel
+  endpoint is posted the reason `Abandoned checkout` and any failure is logged
+  rather than raised — and a session that never created an order (`data.id`
+  absent) is reported `CANCELED` instead of throwing. Deleting a payment
+  session can no longer take the cart down with it, which is what produced the
+  production 500 `Could not delete all payment sessions`.
 
 ### Planned
 
-#### Fixed — #02, #03, #04
+#### Fixed — #03, #04
 
-- **deletePayment** no longer throws for subscription-type sessions (the PayPal
-  billing subscription is cancelled with an "Abandoned checkout" note, and
-  `404 INVALID_RESOURCE_ID` is swallowed as expected) or for sessions that never
-  created a PayPal order (`CANCELED` stub) — switching between payment tracks no
-  longer produces a 500. (Note: `Could not delete all payment sessions` is
-  Medusa core's wrapper text; the plugin's own throw is the missing-`data.id` one.)
 - **approve link**: vaulted checkouts that receive `payer-action` instead of
   `approve` are now matched (both in `initiatePayment` and in
   `initiateSubscriptionSession`), eliminating the silently-missing

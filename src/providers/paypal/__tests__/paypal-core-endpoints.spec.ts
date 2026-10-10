@@ -110,4 +110,29 @@ describe("paypal-core billing endpoint paths", () => {
     const [, init] = await lastFetchCall();
     expect(JSON.parse(String(init.body))).toEqual({});
   });
+
+  it("subscriptionAction posts the reason to /{action}", async () => {
+    const client = makeClient();
+
+    await client.subscriptionAction("I-1", "cancel", "Abandoned checkout");
+
+    const [url, init] = await lastFetchCall();
+    expect(url).toBe(`${sandboxBase}/v1/billing/subscriptions/I-1/cancel`);
+    expect(init.method).toBe("POST");
+    // The cancel endpoint takes `reason` (required, 1-128 chars), not `note` -
+    // that field belongs to the refund endpoints above.
+    expect(JSON.parse(String(init.body))).toEqual({
+      reason: "Abandoned checkout",
+    });
+  });
+
+  it("subscriptionAction defaults the reason when the caller omits it", async () => {
+    const client = makeClient();
+
+    await client.subscriptionAction("I-2", "suspend");
+
+    const [url, init] = await lastFetchCall();
+    expect(url).toBe(`${sandboxBase}/v1/billing/subscriptions/I-2/suspend`);
+    expect(JSON.parse(String(init.body))).toEqual({ reason: "Managed via Medusa" });
+  });
 });
