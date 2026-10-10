@@ -53,7 +53,7 @@ type Harness = {
   orderModule: ReturnType<typeof makeOrderModule>;
   paymentModule: ReturnType<typeof makePaymentModule>;
   workflowEngine: ReturnType<typeof makeWorkflowEngine>;
-  query: ReturnType<typeof makeQuery>;
+  query?: ReturnType<typeof makeQuery>;
   engine: SubscriptionEngine;
 };
 
@@ -68,6 +68,10 @@ function makeHarness(opts: {
     customer_id?: string | null;
     payment_collection_id?: string;
   }>;
+  /** Owner carried by the payment session context, as Medusa fills it. */
+  sessionContextCustomer?: string;
+  /** Drops the query tool, mirroring the payment provider's cradle. */
+  withoutQuery?: boolean;
 } = {}): Harness {
   const subscriptionModule = new FakeSubscriptionModule();
   const eventBus = makeEventBus();
@@ -77,9 +81,11 @@ function makeHarness(opts: {
   const productModule = makeProductModule(variants, opts.productTitles ?? {});
   const firstOrder = "firstOrder" in opts ? opts.firstOrder : makeFirstOrder();
   const orderModule = makeOrderModule(firstOrder);
-  const paymentModule = makePaymentModule();
+  const paymentModule = makePaymentModule(opts.sessionContextCustomer);
   const workflowEngine = makeWorkflowEngine();
-  const query = makeQuery(firstOrder, opts.currencies, variants, opts.carts ?? []);
+  const query = opts.withoutQuery
+    ? undefined
+    : makeQuery(firstOrder, opts.currencies, variants, opts.carts ?? []);
 
   const engine = new SubscriptionEngine({
     client,
@@ -527,6 +533,51 @@ describe("session initiation", () => {
     });
 
     expect(result.row.customer_id).toBeNull();
+  });
+
+  it("reads the owner off the payment session context when the provider has no query", async () => {
+    // The payment provider is built in its own container, where only the
+    // module keys listed in the host's `dependencies` resolve - `query` is not
+    // one of them, so a checkout must never depend on it.
+    const h = makeHarness({
+      withoutQuery: true,
+      sessionContextCustomer: "cus_ctx",
+    });
+
+    const result = await h.engine.initiateSubscriptionSession({
+      sessionId: "sess_1",
+      variantId: "variant_1",
+      currencyCode: "usd",
+      amount: 19.99,
+    });
+
+    expect(result.row.customer_id).toBe("cus_ctx");
+  });
+
+  it("refuses a second live subscription from the session context (R5, no query)", async () => {
+    const h = makeHarness({
+      withoutQuery: true,
+      sessionContextCustomer: "cus_ctx",
+      variants: [makeVariant({ product_id: "prod_1" })],
+    });
+    await h.module.createPaypalSubscriptions(
+      makeRow({
+        status: "ACTIVE",
+        customer_id: "cus_ctx",
+        variant_id: "variant_1",
+      })
+    );
+
+    await expect(
+      h.engine.initiateSubscriptionSession({
+        sessionId: "sess_2",
+        variantId: "variant_1",
+        currencyCode: "usd",
+        amount: 19.99,
+      })
+    ).rejects.toMatchObject({ code: "SUBSCRIPTION_ALREADY_ACTIVE" });
+
+    expect(h.client.createSubscription).not.toHaveBeenCalled();
   });
 
   it("refuses a second live subscription on the redirect path (R5)", async () => {

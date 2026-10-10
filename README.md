@@ -485,8 +485,11 @@ daily reconciliation job backfills anything lost.
 cart, which is what the customer's own `GET /store/paypal/subscriptions`, the
 cancel/revise ownership checks and the one-live-subscription guard all key on.
 The Buttons route reads that owner off the cart; the redirect flow has only the
-payment session, so the engine resolves it through
-`payment session → cart_payment_collection → cart.customer_id`. Hosts therefore
+payment session, so the engine takes it from the session context (Medusa fills
+it from the cart) and falls back to `payment session →
+cart_payment_collection → cart.customer_id` for callers wired with the root
+container. The provider's own container has no `query` tool, so a checkout
+never depends on the fallback. Hosts therefore
 do **not** need to put `customer_id` in the session data for subscriptions
 (that key means "vault the wallet" on the order path - see
 [Vaulted Auto-Renewals](#-vaulted-auto-renewals)). A guest checkout stays

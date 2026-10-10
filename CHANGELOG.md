@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.5] - 2026-10-10
+
+_0.10.4 上线后在真实生产复验时发现：归属兜底写的「payment session → cart 链接 → cart」这条
+链路在**支付 provider 内部跑不通** —— provider 是在自己的 localContainer 里构造的，cradle 只能
+解析宿主 `dependencies` 里列出的模块键（`product`/`order`/`paypalSubscription` 都在，`query`
+不在），`resolveQueryFromCradle` 拿不到 query，兜底静默返回 NULL。结果是 0.10.4 的修复在生产上
+只对「用根容器的调用方」生效，重定向结账仍写 NULL 归属、R5 仍不拦。_
+
+### Fixed
+
+- **归属改读 payment session 的 context**：`resolveCustomerIdForSession` 先读
+  `session.context.customer.id`（Medusa 建 session 时从购物车填入，任何结账路径都有），
+  读不到才退回原来的 cart 链接查询；且 `query` 缺失不再导致整条链路短路（只有退回路径需要它）。
+  重定向结账与每日对账补归属现在都不依赖宿主配置。
+
+### Tests
+
+- 新增 2 例：provider 无 `query` 时从 session context 取到归属；同一条件下 R5 拦下第二条存活订阅
+  且不调用 `createSubscription`。
+
 ## [0.10.4] - 2026-10-10
 
 _生产回归发现：订阅结账走的是「重定向到 PayPal」这条路，而这条路只在宿主把 `customer_id` 写进

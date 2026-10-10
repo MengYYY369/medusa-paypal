@@ -221,7 +221,7 @@ export function makeOrderModule(firstOrder: any) {
   };
 }
 
-export function makePaymentModule() {
+export function makePaymentModule(contextCustomerId?: string) {
   let seq = 0;
 
   return {
@@ -230,6 +230,11 @@ export function makePaymentModule() {
       provider_id: "pp_paypal_paypal",
       payment_collection_id: "col_first",
       currency_code: "usd",
+      // Medusa fills the session context from the cart; the provider's cradle
+      // has no query tool, so this is how a checkout reaches its owner.
+      context: contextCustomerId
+        ? { customer: { id: contextCustomerId } }
+        : undefined,
     })),
     createPaymentCollections: jest.fn(async (inputs: any[]) =>
       inputs.map((input) => ({ id: `col_renewal_${++seq}`, ...input }))

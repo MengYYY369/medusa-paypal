@@ -600,10 +600,12 @@ export class SubscriptionEngine {
    * The redirect flow cannot: it reaches the engine from the payment provider,
    * which only sees the payment session, and hosts reserve `customer_id` in
    * the session data as a *vault* signal - so a subscription checkout arrives
-   * without it. Resolving the cart behind the session keeps the row's owner
-   * intact, which is what the customer's own subscriptions page, the
-   * cancel/revise ownership checks and the one-live-subscription guard all
-   * key on. A guest checkout (cart without a customer) stays NULL.
+   * without it. Two sources are tried, cheapest first: the session context
+   * Medusa fills from the cart (always present in a checkout), then the cart
+   * link behind the session. Either keeps the row's owner intact, which is
+   * what the customer's own subscriptions page, the cancel/revise ownership
+   * checks and the one-live-subscription guard all key on. A guest checkout
+   * (cart without a customer) stays NULL.
    */
   private async resolveCustomerIdForSession({
     sessionId,
@@ -619,7 +621,7 @@ export class SubscriptionEngine {
     const query = (this.deps as Record<string, any>).query;
     const paymentModule = this.deps.paymentModule;
 
-    if (!query?.graph || !paymentModule?.retrievePaymentSession) {
+    if (!paymentModule?.retrievePaymentSession) {
       return null;
     }
 
@@ -627,7 +629,21 @@ export class SubscriptionEngine {
       const session = await paymentModule.retrievePaymentSession(sessionId);
       const paymentCollectionId = session?.payment_collection_id;
 
-      if (!paymentCollectionId) {
+      /**
+       * Medusa fills the payment session context from the cart, so the
+       * customer rides along with the session itself. This is the source that
+       * works everywhere: the payment provider's cradle carries no `query`
+       * (only the module keys listed in the host's `dependencies`), so the
+       * link lookup below never runs inside a checkout - it serves the
+       * reconciliation job and any caller wired with the root container.
+       */
+      const contextCustomerId = (session as any)?.context?.customer?.id;
+
+      if (typeof contextCustomerId === "string" && contextCustomerId) {
+        return contextCustomerId;
+      }
+
+      if (!query?.graph || !paymentCollectionId) {
         return null;
       }
 
