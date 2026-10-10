@@ -63,6 +63,11 @@ function makeHarness(opts: {
   firstOrder?: any;
   client?: any;
   currencies?: Array<{ code: string; decimal_digits: number }>;
+  carts?: Array<{
+    id: string;
+    customer_id?: string | null;
+    payment_collection_id?: string;
+  }>;
 } = {}): Harness {
   const subscriptionModule = new FakeSubscriptionModule();
   const eventBus = makeEventBus();
@@ -74,7 +79,7 @@ function makeHarness(opts: {
   const orderModule = makeOrderModule(firstOrder);
   const paymentModule = makePaymentModule();
   const workflowEngine = makeWorkflowEngine();
-  const query = makeQuery(firstOrder, opts.currencies, variants);
+  const query = makeQuery(firstOrder, opts.currencies, variants, opts.carts ?? []);
 
   const engine = new SubscriptionEngine({
     client,
@@ -488,6 +493,67 @@ describe("session initiation", () => {
 
     expect(h.client.createSubscription).toHaveBeenCalledTimes(1);
     expect(second.paypalSubscriptionId).toBe(first.paypalSubscriptionId);
+  });
+
+  it("resolves the owner from the cart when the provider passes no customer_id", async () => {
+    const h = makeHarness({
+      carts: [
+        {
+          id: "cart_1",
+          customer_id: "cus_cart",
+          payment_collection_id: "col_first",
+        },
+      ],
+    });
+
+    const result = await h.engine.initiateSubscriptionSession({
+      sessionId: "sess_1",
+      variantId: "variant_1",
+      currencyCode: "usd",
+      amount: 19.99,
+    });
+
+    expect(result.row.customer_id).toBe("cus_cart");
+  });
+
+  it("leaves a guest checkout without an owner", async () => {
+    const h = makeHarness();
+
+    const result = await h.engine.initiateSubscriptionSession({
+      sessionId: "sess_1",
+      variantId: "variant_1",
+      currencyCode: "usd",
+      amount: 19.99,
+    });
+
+    expect(result.row.customer_id).toBeNull();
+  });
+
+  it("refuses a second live subscription on the redirect path (R5)", async () => {
+    const h = makeHarness({
+      variants: [makeVariant({ product_id: "prod_1" })],
+      carts: [
+        {
+          id: "cart_1",
+          customer_id: "cus_cart",
+          payment_collection_id: "col_first",
+        },
+      ],
+    });
+    await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", customer_id: "cus_cart", variant_id: "variant_1" })
+    );
+
+    await expect(
+      h.engine.initiateSubscriptionSession({
+        sessionId: "sess_2",
+        variantId: "variant_1",
+        currencyCode: "usd",
+        amount: 19.99,
+      })
+    ).rejects.toMatchObject({ code: "SUBSCRIPTION_ALREADY_ACTIVE" });
+
+    expect(h.client.createSubscription).not.toHaveBeenCalled();
   });
 });
 
@@ -1492,6 +1558,26 @@ describe("reconciliation", () => {
     expect(result.aligned).toBe(1);
     expect(h.module.subscriptions[0].status).toBe("CANCELLED");
     expect(h.rail.payloads[0]).toMatchObject({ status: "cancelled", transition: "status" });
+  });
+
+  it("backfills a missing customer_id from the cart behind the session", async () => {
+    const h = makeHarness({
+      carts: [
+        {
+          id: "cart_1",
+          customer_id: "cus_cart",
+          payment_collection_id: "col_first",
+        },
+      ],
+    });
+    await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", customer_id: null })
+    );
+
+    const result = await h.engine.reconcile();
+
+    expect(result.customersBackfilled).toBe(1);
+    expect(h.module.subscriptions[0].customer_id).toBe("cus_cart");
   });
 
   it("heals a plan switch PayPal applied but no webhook reported", async () => {

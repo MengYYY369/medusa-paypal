@@ -48,6 +48,7 @@ export default async function paypalSubscriptionReconciliation(
   logger.info(
     `PayPal subscription reconciliation: ${result.aligned} status-aligned, ` +
       `${result.salesBackfilled} sales backfilled, ` +
+      `${result.customersBackfilled} customers backfilled, ` +
       `${result.firstPurchasesBackfilled} first purchases compensated.`
   );
 }

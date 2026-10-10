@@ -277,7 +277,12 @@ export function makePaymentModule() {
 export function makeQuery(
   firstOrder: any,
   currencies: Array<{ code: string; decimal_digits: number }> = [],
-  variants: any[] = []
+  variants: any[] = [],
+  carts: Array<{
+    id: string;
+    customer_id?: string | null;
+    payment_collection_id?: string;
+  }> = []
 ) {
   return {
     graph: jest.fn(async ({ entity, filters }: any) => {
@@ -310,6 +315,26 @@ export function makeQuery(
             filters.payment_collection_id === firstOrder.payment_collection_id);
 
         return { data: match ? [{ order_id: firstOrder.id }] : [] };
+      }
+
+      // The cart behind a payment session - how a redirect checkout recovers
+      // the subscription's owner when the host never put one on the session.
+      if (entity === "cart_payment_collection") {
+        const match = carts.find(
+          (cart) =>
+            !filters?.payment_collection_id ||
+            cart.payment_collection_id === filters.payment_collection_id
+        );
+
+        return { data: match ? [{ cart_id: match.id }] : [] };
+      }
+
+      if (entity === "cart") {
+        const match = carts.find(
+          (cart) => !filters?.id || cart.id === filters.id
+        );
+
+        return { data: match ? [{ customer_id: match.customer_id ?? null }] : [] };
       }
 
       return { data: [] };

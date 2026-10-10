@@ -634,6 +634,7 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
     aligned: number;
     salesBackfilled: number;
     firstPurchasesBackfilled: number;
+    customersBackfilled: number;
   }> {
     const engine = await this.withModules(modules);
 

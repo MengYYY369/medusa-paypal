@@ -481,6 +481,18 @@ captured mechanism. Customers who approve but never return to the store are
 covered: the standard workflow completes their cart from the webhook, and the
 daily reconciliation job backfills anything lost.
 
+**Ownership**: a subscription row belongs to the customer behind the checkout
+cart, which is what the customer's own `GET /store/paypal/subscriptions`, the
+cancel/revise ownership checks and the one-live-subscription guard all key on.
+The Buttons route reads that owner off the cart; the redirect flow has only the
+payment session, so the engine resolves it through
+`payment session → cart_payment_collection → cart.customer_id`. Hosts therefore
+do **not** need to put `customer_id` in the session data for subscriptions
+(that key means "vault the wallet" on the order path - see
+[Vaulted Auto-Renewals](#-vaulted-auto-renewals)). A guest checkout stays
+unowned, and a row created before 0.10.4 with a NULL owner is repaired by the
+daily reconciliation pass (`customersBackfilled`).
+
 **First-period amount semantics**: the cart total equals the full recurring
 price, but with a trial/setup fee PayPal charges only the setup fee (or `0`)
 up front. The order therefore shows a partial capture until the first regular
@@ -561,14 +573,17 @@ the rail event carries the subscription's state, not money.
   cycle. Switching to the plan the customer is already on is a no-op.
   The change is mirrored to the rail as a `status` transition carrying the new
   plan id and interval.
-- **One live subscription per product**: creating a subscription
-  (`POST /store/paypal/subscriptions`) is refused with HTTP 400 and
-  `{ "code": "SUBSCRIPTION_ALREADY_ACTIVE" }` when the buyer already has an
-  `ACTIVE` or `SUSPENDED` subscription for that product; the message names the
-  product and points at cancelling or switching plans. `APPROVAL_PENDING` rows
-  are abandoned checkouts and do not block, and a guest checkout (no customer
-  on the cart) is not checked - this is a data-level guard against
-  double-billing, not an identity check.
+- **One live subscription per product**: creating a subscription is refused
+  with HTTP 400 and `{ "code": "SUBSCRIPTION_ALREADY_ACTIVE" }` when the buyer
+  already has an `ACTIVE` or `SUSPENDED` subscription for that product; the
+  message names the product and points at cancelling or switching plans. The
+  guard runs on **both** approval paths - the Buttons route before it creates
+  anything, and the redirect flow inside `initiateSubscriptionSession` before
+  the PayPal subscription is created, so a refused checkout never leaves an
+  orphan subscription on PayPal. `APPROVAL_PENDING` rows are abandoned
+  checkouts and do not block, and a guest checkout (no customer on the cart)
+  is not checked - this is a data-level guard against double-billing, not an
+  identity check.
 - **Rail events**: every subscription transition is published as
   `payment-rail.native_subscription.changed`, a name this package does **not**
   define — the host wires `onNativeSubscriptionChanged` from

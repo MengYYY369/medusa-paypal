@@ -594,6 +594,74 @@ export class SubscriptionEngine {
   // -------------------------------------------------------------------------
 
   /**
+   * The customer a subscription belongs to.
+   *
+   * The Buttons route reads the owner straight off the cart and passes it in.
+   * The redirect flow cannot: it reaches the engine from the payment provider,
+   * which only sees the payment session, and hosts reserve `customer_id` in
+   * the session data as a *vault* signal - so a subscription checkout arrives
+   * without it. Resolving the cart behind the session keeps the row's owner
+   * intact, which is what the customer's own subscriptions page, the
+   * cancel/revise ownership checks and the one-live-subscription guard all
+   * key on. A guest checkout (cart without a customer) stays NULL.
+   */
+  private async resolveCustomerIdForSession({
+    sessionId,
+    customerId,
+  }: {
+    sessionId: string;
+    customerId?: string | null;
+  }): Promise<string | null> {
+    if (customerId) {
+      return customerId;
+    }
+
+    const query = (this.deps as Record<string, any>).query;
+    const paymentModule = this.deps.paymentModule;
+
+    if (!query?.graph || !paymentModule?.retrievePaymentSession) {
+      return null;
+    }
+
+    try {
+      const session = await paymentModule.retrievePaymentSession(sessionId);
+      const paymentCollectionId = session?.payment_collection_id;
+
+      if (!paymentCollectionId) {
+        return null;
+      }
+
+      const links = await query.graph({
+        entity: "cart_payment_collection",
+        filters: { payment_collection_id: paymentCollectionId },
+        fields: ["cart_id"],
+      });
+
+      const cartId = links?.data?.[0]?.cart_id;
+
+      if (!cartId) {
+        return null;
+      }
+
+      const carts = await query.graph({
+        entity: "cart",
+        filters: { id: cartId },
+        fields: ["customer_id"],
+      });
+
+      const resolved = carts?.data?.[0]?.customer_id;
+
+      return typeof resolved === "string" && resolved ? resolved : null;
+    } catch (error) {
+      this.deps.logger?.warn?.(
+        `Could not resolve the customer behind subscription session ${sessionId}: ${String(error)}`
+      );
+
+      return null;
+    }
+  }
+
+  /**
    * Creates the PayPal subscription for a payment session (idempotent per
    * session - the Buttons route and the initiate branch converge here) and
    * records the APPROVAL_PENDING row.
@@ -658,6 +726,20 @@ export class SubscriptionEngine {
       );
     }
 
+    const resolvedCustomerId = await this.resolveCustomerIdForSession({
+      sessionId,
+      customerId,
+    });
+
+    // R5 belongs here as well as on the Buttons route: the redirect flow
+    // creates its PayPal subscription during initiatePayment, where that
+    // route never runs, so without this the guard is dead on the path the
+    // storefront actually uses.
+    await this.assertNoConflictingSubscription({
+      customerId: resolvedCustomerId,
+      variantId,
+    });
+
     const { planRow, config } = await this.ensurePlan({
       variant,
       config: declaration,
@@ -696,7 +778,7 @@ export class SubscriptionEngine {
       paypal_subscription_id: subscription.id,
       paypal_plan_id: planRow.paypal_plan_id,
       variant_id: variantId,
-      customer_id: customerId ?? null,
+      customer_id: resolvedCustomerId,
       payment_session_id: sessionId,
       payment_collection_id: paymentCollectionId,
       provider_id: providerId,
@@ -1924,7 +2006,7 @@ export class SubscriptionEngine {
    * completes never-returned carts), and backfills missed renewal orders.
    * Every branch is idempotent - repeated runs are no-ops.
    */
-  async reconcile(): Promise<{ aligned: number; salesBackfilled: number; firstPurchasesBackfilled: number }> {
+  async reconcile(): Promise<{ aligned: number; salesBackfilled: number; firstPurchasesBackfilled: number; customersBackfilled: number }> {
     const { subscriptionModule, logger, client } = this.deps;
 
     // APPROVAL_PENDING rows are included so stuck approvals (buyer approved,
@@ -1936,8 +2018,29 @@ export class SubscriptionEngine {
     let aligned = 0;
     let salesBackfilled = 0;
     let firstPurchasesBackfilled = 0;
+    let customersBackfilled = 0;
 
     for (const row of rows as SubscriptionRow[]) {
+      // 0. Ownership backfill: rows created by a redirect checkout before the
+      //    engine learned to resolve its customer carry a NULL customer_id,
+      //    which hides them from the owner's subscriptions page and from the
+      //    one-live-subscription guard. The cart behind the session is the
+      //    authority; a guest checkout resolves to nothing and stays NULL.
+      if (!row.customer_id) {
+        const resolved = await this.resolveCustomerIdForSession({
+          sessionId: row.payment_session_id,
+        });
+
+        if (resolved) {
+          await subscriptionModule.updatePaypalSubscriptions({
+            id: row.id,
+            customer_id: resolved,
+          });
+
+          row.customer_id = resolved;
+          customersBackfilled += 1;
+        }
+      }
       let subscription: any;
 
       try {
@@ -2137,7 +2240,7 @@ export class SubscriptionEngine {
       }
     }
 
-    return { aligned, salesBackfilled, firstPurchasesBackfilled };
+    return { aligned, salesBackfilled, firstPurchasesBackfilled, customersBackfilled };
   }
 
   private async resolveFirstOrderSafe(row: SubscriptionRow): Promise<any | null> {

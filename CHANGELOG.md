@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.4] - 2026-10-10
+
+_生产回归发现：订阅结账走的是「重定向到 PayPal」这条路，而这条路只在宿主把 `customer_id` 写进
+payment session data 时才会给订阅行记归属 —— 宿主（storefront）把该字段当作“勾了自动续费”的
+vault 信号，订阅结账从不写，于是线上 4 条订阅行的 `customer_id` 全是 NULL。后果有两层：
+客户自己的订阅列表查不到（`GET /store/paypal/subscriptions` 返回空）、取消/改签一律 404；
+R5「同商品只允许一条存活订阅」守门也永远查不到冲突行，重复订阅不被拦。_
+
+### Fixed
+
+- **订阅归属兜底**：`initiateSubscriptionSession` 在调用方没给 `customerId` 时，沿
+  payment session → `cart_payment_collection` → `cart.customer_id` 反查归属并写进行。
+  访客结账（购物车无客户）仍为 NULL，语义不变。
+- **R5 守门下沉到重定向流程**：`initiateSubscriptionSession` 在创建 PayPal 订阅**之前**
+  调用 `assertNoConflictingSubscription`。此前该守门只在
+  `POST /store/paypal/subscriptions`（Buttons 流程）里，而重定向流程在 `initiatePayment`
+  阶段就建好订阅，那个路由会因 `paypal_subscription_id` 已存在而短路，守门形同虚设。
+  冲突时抛 `INVALID_DATA` + `SUBSCRIPTION_ALREADY_ACTIVE`，且**不会**在 PayPal 侧留下孤儿订阅。
+- **对账补归属**：`reconcile()` 新增第 4 个计数 `customersBackfilled`，对 `customer_id` 为 NULL 的
+  行按同一条链路反查补写 —— 已部署环境的历史行在次日对账（或手动跑一次对账）后自愈。
+
+### Tests
+
+- 新增 4 例：重定向流程从购物车反查归属；访客结账仍为 NULL；重定向流程触发 R5 且不调用
+  `createSubscription`；对账把 NULL 归属补回。
+
 ## [0.10.3] - 2026-10-10
 
 _订阅 webhook 在 2026-10-10 被补上了 `BILLING.SUBSCRIPTION.RE-ACTIVATED`（此前宿主侧未勾选，插件侧也无分支）。插件侧补分支是因为：买家在 PayPal 侧自行恢复订阅（或在 PayPal 重试扣款成功后由 PayPal 自动恢复）时，此前事件落进 `switch` 的 `default`，只回一句 `not_supported`，本地行会一直停在 `SUSPENDED` —— 前台显示“已暂停”、续费日为空，直到第二天凌晨的 `reconcile()` 才被拉回 `ACTIVE`。_
