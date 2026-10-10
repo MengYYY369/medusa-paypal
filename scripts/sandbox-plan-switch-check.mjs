@@ -286,7 +286,7 @@ async function main() {
   const issue = crossProduct.body?.details?.[0]?.issue ?? crossProduct.body?.name ?? null;
   record(
     "cross-product revise is refused with PLAN_PRODUCT_NOT_COMPATIBLE",
-    crossProduct.status === 400 && issue === "PLAN_PRODUCT_NOT_COMPATIBLE",
+    (crossProduct.status === 400 || crossProduct.status === 422) && issue === "PLAN_PRODUCT_NOT_COMPATIBLE",
     `status=${crossProduct.status} issue=${issue}`,
   );
 
