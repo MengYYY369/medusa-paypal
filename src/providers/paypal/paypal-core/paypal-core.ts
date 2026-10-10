@@ -839,7 +839,14 @@ export class PaypalService {
   private async billingRequest<T>(
     method: "GET" | "POST" | "PUT" | "PATCH",
     path: string,
-    body?: Record<string, unknown>
+    body?: Record<string, unknown>,
+    /**
+     * Caller-supplied idempotency key. PayPal keeps the key for 72h and
+     * replays the original response for a retry that reuses it, so callers
+     * that can be retried with the same intent should pass a deterministic
+     * value instead of letting the client mint a fresh one per attempt.
+     */
+    requestId?: string
   ): Promise<T> {
     const accessToken = await this.getAccessToken();
 
@@ -848,7 +855,9 @@ export class PaypalService {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/json",
-        ...(method === "POST" && { "PayPal-Request-Id": this.newRequestId() }),
+        ...(method === "POST" && {
+          "PayPal-Request-Id": requestId ?? this.newRequestId(),
+        }),
       },
       ...(body !== undefined && { body: JSON.stringify(body) }),
     });
@@ -941,6 +950,32 @@ export class PaypalService {
     return this.billingRequest<PaypalSubscriptionResponse>(
       "GET",
       `/v1/billing/subscriptions/${encodeURIComponent(id)}`
+    );
+  }
+
+  /**
+   * Revises an existing subscription in place - the plan (and therefore the
+   * price and the billing frequency) changes, the subscription id, its
+   * approval and its billing history do not. PayPal only accepts this on an
+   * ACTIVE or SUSPENDED subscription, and rejects a plan that belongs to
+   * another product with PLAN_PRODUCT_NOT_COMPATIBLE.
+   *
+   * The new plan takes effect on the next billing cycle: PayPal does not
+   * prorate the remainder of the current cycle. `requestId` is required
+   * because the call is not safely repeatable with a fresh key - the caller
+   * derives it from the subscription and the target plan so a retry of the
+   * same switch is replayed instead of applied twice.
+   */
+  async reviseSubscription(
+    id: string,
+    planId: string,
+    requestId: string
+  ): Promise<PaypalSubscriptionResponse> {
+    return this.billingRequest<PaypalSubscriptionResponse>(
+      "POST",
+      `/v1/billing/subscriptions/${encodeURIComponent(id)}/revise`,
+      { plan_id: planId },
+      requestId
     );
   }
 

@@ -3,6 +3,7 @@ import { Logger, WebhookActionResult } from "@medusajs/framework/types";
 import {
   PaypalService,
   PaypalBillingCycleInput,
+  PaypalSubscriptionResponse,
   extractApproveUrl,
   formatPaypalAmount,
 } from "../providers/paypal/paypal-core/paypal-core";
@@ -338,6 +339,98 @@ export class SubscriptionEngine {
   }
 
   /**
+   * R5: one live subscription per customer per product.
+   *
+   * A second live subscription for the same product is almost always a
+   * double-billing accident - the customer forgot they were already
+   * subscribed, or abandoned an approval and started over - so checkout
+   * refuses it and names the two legitimate ways forward: cancel it, or switch
+   * plans. The error carries the `SUBSCRIPTION_ALREADY_ACTIVE` code so the
+   * storefront can route the customer into the switch flow instead of
+   * rendering a dead end.
+   *
+   * Only ACTIVE and SUSPENDED rows block. An APPROVAL_PENDING row is an
+   * abandoned checkout, and blocking on it would trap a customer behind a
+   * subscription they never approved (PayPal expires those on its own);
+   * CANCELLED and EXPIRED rows are history. A guest checkout has no customer
+   * to key on and is left alone - this is a data-level guard against a second
+   * subscription, not an identity check.
+   */
+  async assertNoConflictingSubscription({
+    customerId,
+    variantId,
+  }: {
+    customerId?: string | null;
+    variantId: string;
+  }): Promise<void> {
+    if (!customerId || !variantId) {
+      return;
+    }
+
+    const productModule = this.require(
+      "productModule",
+      "subscription conflict check"
+    );
+
+    const targetVariants = await listVariantsByIds(productModule, [variantId]);
+    const targetProductId = targetVariants?.[0]?.product_id;
+
+    if (!targetProductId) {
+      return;
+    }
+
+    const liveRows = (await this.deps.subscriptionModule.listPaypalSubscriptions({
+      customer_id: customerId,
+      status: ["ACTIVE", "SUSPENDED"],
+    })) as SubscriptionRow[];
+
+    const liveVariantIds = [
+      ...new Set(liveRows.map((row) => row.variant_id).filter(Boolean)),
+    ];
+
+    if (!liveVariantIds.length) {
+      return;
+    }
+
+    const liveVariants = await listVariantsByIds(productModule, liveVariantIds);
+
+    const conflicting = liveRows.find((row) => {
+      const variant = (liveVariants ?? []).find(
+        (candidate) => candidate.id === row.variant_id
+      );
+
+      return variant?.product_id === targetProductId;
+    });
+
+    if (!conflicting) {
+      return;
+    }
+
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      `You already have an active subscription for ${await this.productNameFor(
+        productModule,
+        targetProductId
+      )}. Cancel it first, or switch to another plan from your subscriptions page.`,
+      "SUBSCRIPTION_ALREADY_ACTIVE"
+    );
+  }
+
+  /** Product title for a refusal message; the id is a poor thing to show a customer. */
+  private async productNameFor(
+    productModule: any,
+    productId: string
+  ): Promise<string> {
+    try {
+      const product = await productModule.retrieveProduct(productId);
+
+      return product?.title ?? "this product";
+    } catch {
+      return "this product";
+    }
+  }
+
+  /**
    * Gets the cached PayPal plan for variant x currency x config hash, or
    * creates the PayPal product + plan (plan immutable -> new version per
    * hash) and caches the row.
@@ -640,7 +733,12 @@ export class SubscriptionEngine {
     const subscription = await client.getSubscription(row.paypal_subscription_id);
 
     if (subscription.status === "ACTIVE") {
-      await this.transitionRow(row, "ACTIVE");
+      // The renewal date rides into the same write as the status change, so
+      // the rail event carries it (rows that were already ACTIVE keep their
+      // value; the daily reconciliation is what backfills those).
+      const withBillingInfo = await this.backfillNextBillingAt(row, subscription);
+
+      await this.transitionRow(withBillingInfo, "ACTIVE");
 
       return { status: "authorized", data: sessionData };
     }
@@ -658,11 +756,45 @@ export class SubscriptionEngine {
     };
   }
 
+  /**
+   * Persists the renewal date PayPal reports for an activated subscription.
+   *
+   * `billing_info.next_billing_time` is absent while a subscription is still
+   * APPROVAL_PENDING and on some freshly activated ones; a missing or
+   * unparseable value leaves the column untouched (and warns) rather than
+   * writing a bogus date - the host mirrors this column as the customer's next
+   * charge day, so "unknown" beats "wrong".
+   */
+  private async backfillNextBillingAt(
+    row: SubscriptionRow,
+    subscription: PaypalSubscriptionResponse
+  ): Promise<SubscriptionRow> {
+    const raw = subscription?.billing_info?.next_billing_time;
+    const parsed = raw ? new Date(raw) : null;
+    const next = parsed && !Number.isNaN(parsed.getTime()) ? parsed : null;
+
+    if (!next) {
+      this.deps.logger.warn(
+        `PayPal reported no next billing time for subscription ${row.id} (${row.paypal_subscription_id}); next_billing_at left unset.`
+      );
+
+      return row;
+    }
+
+    const updated = firstOrSelf(
+      await this.deps.subscriptionModule.updatePaypalSubscriptions({
+        id: row.id,
+        next_billing_at: next,
+      })
+    );
+
+    return (updated as SubscriptionRow) ?? { ...row, next_billing_at: next };
+  }
+
   private async findRowBySessionData(
     sessionData: Record<string, unknown>
   ): Promise<SubscriptionRow | null> {
     const { subscriptionModule } = this.deps;
-
     if (sessionData.paypal_subscription_id) {
       const rows = await subscriptionModule.listPaypalSubscriptions({
         paypal_subscription_id: sessionData.paypal_subscription_id,
@@ -751,6 +883,12 @@ export class SubscriptionEngine {
     return rows[0] ?? null;
   }
 
+  /**
+   * ACTIVATED carries the whole subscription resource, so the renewal date is
+   * read off the webhook itself - no extra PayPal call - and written together
+   * with the status flip, which is what puts `next_billing_at` into the rail
+   * event the host mirrors as the customer's next charge day.
+   */
   private async onSubscriptionActivated(resource: any): Promise<void> {
     const row = await this.findRowByPaypalId(resource?.id);
 
@@ -762,12 +900,16 @@ export class SubscriptionEngine {
     }
 
     if (row.status === "SUSPENDED") {
-      await this.transitionRow(row, "ACTIVE", "status");
+      const withBillingInfo = await this.backfillNextBillingAt(row, resource);
+
+      await this.transitionRow(withBillingInfo, "ACTIVE", "status");
       return;
     }
 
     if (row.status !== "ACTIVE") {
-      await this.transitionRow(row, "ACTIVE", "status");
+      const withBillingInfo = await this.backfillNextBillingAt(row, resource);
+
+      await this.transitionRow(withBillingInfo, "ACTIVE", "status");
     }
   }
 
@@ -1408,6 +1550,149 @@ export class SubscriptionEngine {
     }
 
     return this.requestLifecycleAction(row, "cancel");
+  }
+
+  /**
+   * Switches a subscription to another plan in place (PayPal `revise`): the
+   * subscription id, its approval and its billing history survive, the new
+   * plan applies from the next billing cycle, and the remainder of the current
+   * cycle is not prorated.
+   *
+   * The rail is notified with `transition: "status"`: a revise keeps the
+   * subscription where it is, so the host only has to refresh its mirror row -
+   * the new plan id, price and interval ride along in the record itself. No
+   * event name is involved here (see `notifyRailChange`).
+   */
+  async customerRevise(
+    row: SubscriptionRow,
+    customerId: string,
+    input: { variantId: string }
+  ): Promise<SubscriptionRow> {
+    const { client, subscriptionModule } = this.deps;
+
+    if (row.customer_id !== customerId) {
+      // Not-found instead of forbidden: do not leak other customers' rows.
+      throw new MedusaError(
+        MedusaError.Types.NOT_FOUND,
+        `Subscription ${row.id} not found`
+      );
+    }
+
+    // The price of the target plan is the variant's live price for the
+    // subscription's own currency - a subscription never changes currency.
+    const target = await this.resolveSubscriptionVariant(
+      input.variantId,
+      row.currency_code
+    );
+
+    if (!target) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `Variant ${input.variantId} is not a subscription variant`
+      );
+    }
+
+    // Already on the requested plan: converge instead of calling PayPal, so a
+    // retry of a switch that already landed is a no-op rather than an error.
+    if (target.variant.id === row.variant_id) {
+      return row;
+    }
+
+    if (row.status !== "ACTIVE" && row.status !== "SUSPENDED") {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `Subscription ${row.id} cannot switch plans while it is ${row.status}. Only an active or paused subscription can be revised.`
+      );
+    }
+
+    await this.assertPlanSwitchIsIntraProduct(row, target.variant);
+
+    const { planRow } = await this.ensurePlan({
+      variant: target.variant,
+      config: target.declaration,
+      currencyCode: row.currency_code,
+      amount: target.amount,
+    });
+
+    // Deterministic idempotency key: PayPal keeps it for 72h, so a retried
+    // switch reuses the original response instead of revising twice.
+    const requestId = `revise-${row.id}-${planRow.paypal_plan_id}`;
+
+    try {
+      await client.reviseSubscription(
+        row.paypal_subscription_id,
+        planRow.paypal_plan_id,
+        requestId
+      );
+    } catch (error: any) {
+      // PayPal's own compatibility rules are the last word (our product check
+      // can only see the variants, not the plans PayPal already holds).
+      if (error?.paypalStatus === 422 || error?.paypalStatus === 400) {
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          `PayPal rejected the plan switch for subscription ${row.id}: ${error.message}`
+        );
+      }
+
+      throw error;
+    }
+
+    const updated = firstOrSelf(
+      await subscriptionModule.updatePaypalSubscriptions({
+        id: row.id,
+        variant_id: target.variant.id,
+        paypal_plan_id: planRow.paypal_plan_id,
+        locked_amount: target.amount,
+        interval_unit: target.declaration.interval_unit,
+        interval_count: target.declaration.interval_count,
+      })
+    );
+
+    const next =
+      (updated as SubscriptionRow) ??
+      ({
+        ...row,
+        variant_id: target.variant.id,
+        paypal_plan_id: planRow.paypal_plan_id,
+        locked_amount: target.amount,
+        interval_unit: target.declaration.interval_unit,
+        interval_count: target.declaration.interval_count,
+      } as SubscriptionRow);
+
+    await this.notifyRailChange(next, "status", toRailStatus(next.status));
+
+    return next;
+  }
+
+  /**
+   * PayPal refuses a revise whose plan belongs to another product
+   * (PLAN_PRODUCT_NOT_COMPATIBLE), and a cross-product switch is not something
+   * the customer can decide on their own anyway: the two products have
+   * different delivery and entitlement stories. Checked here so the storefront
+   * gets a message that names the way out instead of a PayPal 422.
+   */
+  private async assertPlanSwitchIsIntraProduct(
+    row: SubscriptionRow,
+    targetVariant: any
+  ): Promise<void> {
+    const targetProductId = targetVariant?.product_id;
+
+    if (!targetProductId) {
+      return;
+    }
+
+    const productModule = this.require("productModule", "plan switch");
+    const currentVariants = await listVariantsByIds(productModule, [
+      row.variant_id,
+    ]);
+    const currentProductId = currentVariants?.[0]?.product_id;
+
+    if (currentProductId && currentProductId !== targetProductId) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "A subscription can only switch to another plan of the same product. To move to a different product, cancel this subscription and subscribe to the new one."
+      );
+    }
   }
 
   /**

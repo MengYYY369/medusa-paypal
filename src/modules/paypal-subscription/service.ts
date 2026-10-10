@@ -525,6 +525,21 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
     return engine.detectSubscriptionSession(items);
   }
 
+  /**
+   * R5 guard for the Buttons route: refuses a second live subscription for a
+   * product the customer is already subscribed to (see the engine method for
+   * the exact predicate). Throws a MedusaError carrying
+   * `SUBSCRIPTION_ALREADY_ACTIVE` in `code`.
+   */
+  async assertNoConflictingSubscription(
+    { customerId, variantId }: { customerId?: string | null; variantId: string },
+    modules: SubscriptionEngineModules = {}
+  ): Promise<void> {
+    const engine = await this.withModules(modules);
+
+    return engine.assertNoConflictingSubscription({ customerId, variantId });
+  }
+
   async getOrCreateSubscriptionForSession(
     { sessionId, email, customerId, variantId, currencyCode, amount, returnUrl, cancelUrl }: {
       sessionId: string;
@@ -591,6 +606,23 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
     const engine = await this.resolveEngine();
 
     return engine.customerCancel(row, customerId);
+  }
+
+  /**
+   * Customer self-service plan switch. Resolves the target variant (and its
+   * live price for the subscription's currency), so this one needs the query
+   * and product modules - the store route passes them.
+   */
+  async customerRevise(
+    id: string,
+    customerId: string,
+    input: { variantId: string },
+    modules: SubscriptionEngineModules = {}
+  ): Promise<any> {
+    const row = await (this as any).retrievePaypalSubscription(id);
+    const engine = await this.withModules(modules);
+
+    return engine.customerRevise(row, customerId, input);
   }
 
   // -- Reconciliation ------------------------------------------------------

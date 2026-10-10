@@ -62,6 +62,20 @@ export type AdminListPaypalSettingsAuditQueryType = z.infer<
   typeof AdminListPaypalSettingsAuditQuery
 >;
 
+/**
+ * Body of `POST /store/paypal/subscriptions/:id/revise` (customer plan
+ * switch): the variant whose plan the subscription should move to. The price
+ * and the interval are NOT taken from the client - the route reads the
+ * variant's live price for the subscription's own currency.
+ */
+export const StoreRevisePaypalSubscriptionBody = z.object({
+  variant_id: z.string().min(1),
+});
+
+export type StoreRevisePaypalSubscriptionBodyType = z.infer<
+  typeof StoreRevisePaypalSubscriptionBody
+>;
+
 export default defineMiddlewares({
   routes: [
     {
@@ -84,6 +98,14 @@ export default defineMiddlewares({
       matcher: "/store/paypal/subscriptions/:id/cancel",
       methods: ["POST"],
       middlewares: [authenticate("customer", ["bearer", "session"])],
+    },
+    {
+      matcher: "/store/paypal/subscriptions/:id/revise",
+      methods: ["POST"],
+      middlewares: [
+        authenticate("customer", ["bearer", "session"]),
+        validateAndTransformBody(StoreRevisePaypalSubscriptionBody),
+      ],
     },
     // Mirror of Medusa's core /hooks/payment/:provider config: keep the raw
     // request body available as req.rawBody on the subscription webhook so

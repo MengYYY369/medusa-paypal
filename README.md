@@ -533,6 +533,28 @@ the rail event carries the subscription's state, not money.
 - **Customer self-service** (customer auth):
   - `GET /store/paypal/subscriptions` - own subscriptions
   - `POST /store/paypal/subscriptions/:id/cancel` - cancel own subscription
+  - `POST /store/paypal/subscriptions/:id/revise` with `{ "variant_id": "..." }` -
+    switch to another plan of the same product
+- **Plan switch (customer self-service)**: revise calls PayPal
+  `POST /v1/billing/subscriptions/{id}/revise`, so the subscription id, its
+  approval and its billing history are untouched - no cancel-then-resubscribe.
+  Only an `ACTIVE` or `SUSPENDED` subscription can be revised, the target must
+  be a variant of the same product (a cross-product move is refused with a
+  readable error instead of PayPal's `PLAN_PRODUCT_NOT_COMPATIBLE`), and the
+  call carries a deterministic `PayPal-Request-Id` so a retry inside PayPal's
+  72h idempotency window reuses the same key instead of applying the change
+  twice. There is no proration: PayPal charges the new price from the next
+  billing cycle. Switching to the plan the customer is already on is a no-op.
+  The change is mirrored to the rail as a `status` transition carrying the new
+  plan id and interval.
+- **One live subscription per product**: creating a subscription
+  (`POST /store/paypal/subscriptions`) is refused with HTTP 400 and
+  `{ "code": "SUBSCRIPTION_ALREADY_ACTIVE" }` when the buyer already has an
+  `ACTIVE` or `SUSPENDED` subscription for that product; the message names the
+  product and points at cancelling or switching plans. `APPROVAL_PENDING` rows
+  are abandoned checkouts and do not block, and a guest checkout (no customer
+  on the cart) is not checked - this is a data-level guard against
+  double-billing, not an identity check.
 - **Rail events**: every subscription transition is published as
   `payment-rail.native_subscription.changed`, a name this package does **not**
   define — the host wires `onNativeSubscriptionChanged` from

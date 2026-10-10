@@ -31,6 +31,7 @@ function makeClient(overrides: Record<string, unknown> = {}) {
       links: [{ rel: "approve", href: "https://www.paypal.com/approve" }],
     }),
     getSubscription: jest.fn().mockResolvedValue({ id: "I-ABC123", status: "ACTIVE" }),
+    reviseSubscription: jest.fn().mockResolvedValue({ id: "I-ABC123", status: "ACTIVE" }),
     subscriptionAction: jest.fn().mockResolvedValue(undefined),
     listSubscriptionTransactions: jest.fn().mockResolvedValue([]),
     getSale: jest.fn().mockResolvedValue({ id: "sale_1", status: "COMPLETED" }),
@@ -58,6 +59,7 @@ type Harness = {
 
 function makeHarness(opts: {
   variants?: any[];
+  productTitles?: Record<string, string>;
   firstOrder?: any;
   client?: any;
   currencies?: Array<{ code: string; decimal_digits: number }>;
@@ -66,12 +68,13 @@ function makeHarness(opts: {
   const eventBus = makeEventBus();
   const rail = makeRailSink();
   const client = opts.client ?? makeClient();
-  const productModule = makeProductModule(opts.variants ?? [makeVariant()]);
+  const variants = opts.variants ?? [makeVariant()];
+  const productModule = makeProductModule(variants, opts.productTitles ?? {});
   const firstOrder = "firstOrder" in opts ? opts.firstOrder : makeFirstOrder();
   const orderModule = makeOrderModule(firstOrder);
   const paymentModule = makePaymentModule();
   const workflowEngine = makeWorkflowEngine();
-  const query = makeQuery(firstOrder, opts.currencies);
+  const query = makeQuery(firstOrder, opts.currencies, variants);
 
   const engine = new SubscriptionEngine({
     client,
@@ -299,6 +302,122 @@ describe("checkout detection", () => {
   });
 });
 
+describe("duplicate-subscription guard (R5)", () => {
+  const monthly = makeVariant({ product_id: "prod_1" });
+  const yearly = makeVariant({
+    id: "variant_2",
+    title: "Yearly Club",
+    product_id: "prod_1",
+    metadata: { paypal_subscription: { interval_unit: "YEAR", interval_count: 1 } },
+    prices: [{ currency_code: "usd", amount: 199 }],
+  });
+  const otherProduct = makeVariant({
+    id: "variant_3",
+    title: "Poster Club",
+    product_id: "prod_2",
+  });
+
+  it("refuses a second live subscription for the same product and names it", async () => {
+    const h = makeHarness({
+      variants: [monthly, yearly],
+      productTitles: { prod_1: "Monthly Club" },
+    });
+    await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", variant_id: "variant_1" })
+    );
+
+    await expect(
+      h.engine.assertNoConflictingSubscription({
+        customerId: "cus_1",
+        variantId: "variant_2",
+      })
+    ).rejects.toMatchObject({
+      type: MedusaError.Types.INVALID_DATA,
+      code: "SUBSCRIPTION_ALREADY_ACTIVE",
+      message: expect.stringContaining("Monthly Club"),
+    });
+  });
+
+  it("blocks a paused subscription too - it still owns the product", async () => {
+    const h = makeHarness({ variants: [monthly, yearly] });
+    await h.module.createPaypalSubscriptions(
+      makeRow({ status: "SUSPENDED", variant_id: "variant_1" })
+    );
+
+    await expect(
+      h.engine.assertNoConflictingSubscription({
+        customerId: "cus_1",
+        variantId: "variant_2",
+      })
+    ).rejects.toMatchObject({ code: "SUBSCRIPTION_ALREADY_ACTIVE" });
+  });
+
+  it("lets a different product through", async () => {
+    const h = makeHarness({ variants: [monthly, yearly, otherProduct] });
+    await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", variant_id: "variant_1" })
+    );
+
+    await expect(
+      h.engine.assertNoConflictingSubscription({
+        customerId: "cus_1",
+        variantId: "variant_3",
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not block on an abandoned approval or on history", async () => {
+    const h = makeHarness({ variants: [monthly, yearly] });
+    await h.module.createPaypalSubscriptions(
+      makeRow({ status: "APPROVAL_PENDING", variant_id: "variant_1" })
+    );
+
+    await expect(
+      h.engine.assertNoConflictingSubscription({
+        customerId: "cus_1",
+        variantId: "variant_2",
+      })
+    ).resolves.toBeUndefined();
+
+    await h.module.updatePaypalSubscriptions({ id: "sub_1", status: "CANCELLED" });
+
+    await expect(
+      h.engine.assertNoConflictingSubscription({
+        customerId: "cus_1",
+        variantId: "variant_2",
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it("scopes the check to the buyer - another customer's subscription is not theirs", async () => {
+    const h = makeHarness({ variants: [monthly, yearly] });
+    await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", customer_id: "cus_other" })
+    );
+
+    await expect(
+      h.engine.assertNoConflictingSubscription({
+        customerId: "cus_2",
+        variantId: "variant_2",
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it("leaves a guest checkout alone (no customer to key on)", async () => {
+    const h = makeHarness({ variants: [monthly, yearly] });
+    await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", customer_id: null })
+    );
+
+    await expect(
+      h.engine.assertNoConflictingSubscription({
+        customerId: null,
+        variantId: "variant_2",
+      })
+    ).resolves.toBeUndefined();
+  });
+});
+
 describe("session initiation", () => {
   it("creates the PayPal subscription with custom_id = session id and records the row", async () => {
     const h = makeHarness();
@@ -412,6 +531,53 @@ describe("authorization", () => {
 
     expect(result.status).toBe("pending");
   });
+
+  it("records the renewal date PayPal reports when it activates the session", async () => {
+    const h = makeHarness({
+      client: makeClient({
+        getSubscription: jest.fn().mockResolvedValue({
+          id: "I-ABC123",
+          status: "ACTIVE",
+          billing_info: { next_billing_time: "2026-11-10T00:00:00Z" },
+        }),
+      }),
+    });
+    await h.module.createPaypalSubscriptions(makeRow({ status: "APPROVAL_PENDING" }));
+
+    const result = await h.engine.authorizeSubscriptionSession({
+      sessionData: { paypal_subscription_id: "I-ABC123" },
+    });
+
+    expect(result.status).toBe("authorized");
+    expect(h.module.subscriptions[0].next_billing_at).toEqual(
+      new Date("2026-11-10T00:00:00Z")
+    );
+    // Authorize stays silent on the rail: activation is published by the
+    // ACTIVATED webhook, this path only makes sure the row is complete by then.
+    expect(h.rail.payloads).toHaveLength(0);
+  });
+
+  it("warns instead of inventing a renewal date when PayPal reports none", async () => {
+    const h = makeHarness({
+      client: makeClient({
+        getSubscription: jest
+          .fn()
+          .mockResolvedValue({ id: "I-ABC123", status: "ACTIVE" }),
+      }),
+    });
+    await h.module.createPaypalSubscriptions(makeRow({ status: "APPROVAL_PENDING" }));
+    loggerStub.warn.mockClear();
+
+    const result = await h.engine.authorizeSubscriptionSession({
+      sessionData: { paypal_subscription_id: "I-ABC123" },
+    });
+
+    expect(result.status).toBe("authorized");
+    expect(h.module.subscriptions[0].next_billing_at).toBeNull();
+    expect(loggerStub.warn).toHaveBeenCalledWith(
+      expect.stringContaining("no next billing time")
+    );
+  });
 });
 
 describe("webhook: BILLING.SUBSCRIPTION.ACTIVATED", () => {
@@ -438,6 +604,25 @@ describe("webhook: BILLING.SUBSCRIPTION.ACTIVATED", () => {
     await h.engine.handleWebhookEvent("BILLING.SUBSCRIPTION.ACTIVATED", { id: "I-ABC123" });
 
     expect(h.rail.payloads[0]).toMatchObject({ status: "active", transition: "status" });
+  });
+
+  it("carries the renewal date off the webhook itself, with no PayPal call", async () => {
+    const h = makeHarness();
+    await h.module.createPaypalSubscriptions(makeRow({ status: "APPROVAL_PENDING" }));
+
+    await h.engine.handleWebhookEvent("BILLING.SUBSCRIPTION.ACTIVATED", {
+      id: "I-ABC123",
+      billing_info: { next_billing_time: "2026-11-10T00:00:00Z" },
+    });
+
+    expect(h.client.getSubscription).not.toHaveBeenCalled();
+    expect(h.module.subscriptions[0].next_billing_at).toEqual(
+      new Date("2026-11-10T00:00:00Z")
+    );
+    expect(h.rail.payloads.at(-1)).toMatchObject({
+      transition: "status",
+      next_billing_at: "2026-11-10T00:00:00.000Z",
+    });
   });
 
   it("ignores unknown subscriptions", async () => {
@@ -857,6 +1042,173 @@ describe("lifecycle actions", () => {
 
     await h.engine.customerCancel(row[0], "cus_1");
     expect(h.module.subscriptions[0].status).toBe("CANCELLED");
+  });
+});
+
+describe("plan switch (revise)", () => {
+  const monthly = makeVariant({ product_id: "prod_1" });
+  const yearly = makeVariant({
+    id: "variant_2",
+    title: "Yearly Club",
+    product_id: "prod_1",
+    metadata: { paypal_subscription: { interval_unit: "YEAR", interval_count: 1 } },
+    prices: [{ currency_code: "usd", amount: 199 }],
+  });
+  const otherProduct = makeVariant({
+    id: "variant_3",
+    title: "Poster Club",
+    product_id: "prod_2",
+  });
+
+  it("switches the plan in place and mirrors the new interval", async () => {
+    const h = makeHarness({ variants: [monthly, yearly] });
+    const row = await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", variant_id: "variant_1" })
+    );
+
+    const revised = await h.engine.customerRevise(row[0], "cus_1", {
+      variantId: "variant_2",
+    });
+
+    expect(h.client.reviseSubscription).toHaveBeenCalledWith(
+      "I-ABC123",
+      "plan_P1",
+      "revise-sub_1-plan_P1"
+    );
+    // In place: no cancel, no new subscription.
+    expect(h.client.subscriptionAction).not.toHaveBeenCalled();
+    expect(h.client.createSubscription).not.toHaveBeenCalled();
+    expect(revised).toMatchObject({
+      variant_id: "variant_2",
+      paypal_plan_id: "plan_P1",
+      locked_amount: 199,
+      interval_unit: "YEAR",
+      interval_count: 1,
+      status: "ACTIVE",
+    });
+    expect(h.rail.payloads.at(-1)).toMatchObject({
+      transition: "status",
+      status: "active",
+      variant_id: "variant_2",
+      plan_id: "plan_P1",
+      interval_unit: "YEAR",
+      interval_count: 1,
+    });
+  });
+
+  it("is a no-op when the customer is already on that plan", async () => {
+    const h = makeHarness({ variants: [monthly, yearly] });
+    const row = await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", variant_id: "variant_2" })
+    );
+
+    const revised = await h.engine.customerRevise(row[0], "cus_1", {
+      variantId: "variant_2",
+    });
+
+    expect(revised.variant_id).toBe("variant_2");
+    expect(h.client.reviseSubscription).not.toHaveBeenCalled();
+    expect(h.rail.payloads).toHaveLength(0);
+  });
+
+  it("reuses the same idempotency key when the same switch is retried", async () => {
+    const h = makeHarness({
+      variants: [monthly, yearly],
+      client: makeClient({
+        reviseSubscription: jest
+          .fn()
+          .mockRejectedValueOnce(
+            Object.assign(new Error("PayPal POST revise failed (500): boom"), {
+              paypalStatus: 500,
+            })
+          )
+          .mockResolvedValue({ id: "I-ABC123", status: "ACTIVE" }),
+      }),
+    });
+    const row = await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", variant_id: "variant_1" })
+    );
+
+    await expect(
+      h.engine.customerRevise(row[0], "cus_1", { variantId: "variant_2" })
+    ).rejects.toThrow(/boom/);
+
+    // PayPal's idempotency window is 72h: a retry of the same switch must
+    // carry the same key or the plan change is applied twice.
+    await h.engine.customerRevise(row[0], "cus_1", { variantId: "variant_2" });
+
+    const keys = h.client.reviseSubscription.mock.calls.map((call: any[]) => call[2]);
+
+    expect(keys).toEqual(["revise-sub_1-plan_P1", "revise-sub_1-plan_P1"]);
+  });
+
+  it("enforces ownership", async () => {
+    const h = makeHarness({ variants: [monthly, yearly] });
+    const row = await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", customer_id: "cus_1" })
+    );
+
+    await expect(
+      h.engine.customerRevise(row[0], "cus_other", { variantId: "variant_2" })
+    ).rejects.toThrow(MedusaError);
+    expect(h.client.reviseSubscription).not.toHaveBeenCalled();
+  });
+
+  it("refuses a cancelled subscription", async () => {
+    const h = makeHarness({ variants: [monthly, yearly] });
+    const row = await h.module.createPaypalSubscriptions(
+      makeRow({ status: "CANCELLED", variant_id: "variant_1" })
+    );
+
+    await expect(
+      h.engine.customerRevise(row[0], "cus_1", { variantId: "variant_2" })
+    ).rejects.toMatchObject({
+      type: MedusaError.Types.INVALID_DATA,
+      message: expect.stringContaining("cannot switch plans"),
+    });
+    expect(h.client.reviseSubscription).not.toHaveBeenCalled();
+  });
+
+  it("refuses a switch across products before calling PayPal", async () => {
+    const h = makeHarness({ variants: [monthly, yearly, otherProduct] });
+    const row = await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", variant_id: "variant_1" })
+    );
+
+    await expect(
+      h.engine.customerRevise(row[0], "cus_1", { variantId: "variant_3" })
+    ).rejects.toMatchObject({
+      type: MedusaError.Types.INVALID_DATA,
+      message: expect.stringContaining("same product"),
+    });
+    expect(h.client.reviseSubscription).not.toHaveBeenCalled();
+    expect(h.module.subscriptions[0].variant_id).toBe("variant_1");
+  });
+
+  it("surfaces PayPal's refusal as a customer-readable error", async () => {
+    const h = makeHarness({
+      variants: [monthly, yearly],
+      client: makeClient({
+        reviseSubscription: jest.fn().mockRejectedValue(
+          Object.assign(new Error("PayPal POST revise failed (422): plan not compatible"), {
+            paypalStatus: 422,
+          })
+        ),
+      }),
+    });
+    const row = await h.module.createPaypalSubscriptions(
+      makeRow({ status: "ACTIVE", variant_id: "variant_1" })
+    );
+
+    await expect(
+      h.engine.customerRevise(row[0], "cus_1", { variantId: "variant_2" })
+    ).rejects.toMatchObject({
+      type: MedusaError.Types.INVALID_DATA,
+      message: expect.stringContaining("PayPal rejected the plan switch"),
+    });
+    // The row keeps the old plan: nothing is written on a failed switch.
+    expect(h.module.subscriptions[0].variant_id).toBe("variant_1");
+    expect(h.rail.payloads).toHaveLength(0);
   });
 });
 

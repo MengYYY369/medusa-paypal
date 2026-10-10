@@ -1,5 +1,5 @@
 import { MedusaRequest, MedusaResponse, MedusaStoreRequest } from "@medusajs/framework/http";
-import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils";
+import { ContainerRegistrationKeys, MedusaError, Modules } from "@medusajs/framework/utils";
 import { resolveSubscriptionModule } from "../../../lib/paypal";
 
 type CreateBody = { session_id?: string };
@@ -90,6 +90,32 @@ export const POST = async (req: MedusaRequest<CreateBody>, res: MedusaResponse) 
     return res.status(400).json({
       error: "Payment session is not a subscription checkout",
     });
+  }
+
+  // R5: one live subscription per customer per product. Refusing the second
+  // one here is what keeps a customer from paying twice for the same thing;
+  // the switch flow (POST /store/paypal/subscriptions/:id/revise) is the
+  // sanctioned way to move to another plan. Guests have no customer to key on
+  // and pass through - this is a data-level guard, not an identity check.
+  try {
+    await module.assertNoConflictingSubscription(
+      {
+        customerId: cart.customer_id ?? null,
+        variantId: detection.variant.id,
+      },
+      { productModule: req.scope.resolve(Modules.PRODUCT) }
+    );
+  } catch (error) {
+    if (
+      error instanceof MedusaError &&
+      error.code === "SUBSCRIPTION_ALREADY_ACTIVE"
+    ) {
+      return res
+        .status(400)
+        .json({ error: error.message, code: error.code });
+    }
+
+    throw error;
   }
 
   const sessionReturnUrl =

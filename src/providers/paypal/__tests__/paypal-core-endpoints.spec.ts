@@ -137,6 +137,51 @@ describe("paypal-core billing endpoint paths", () => {
     expect(url).toBe(`${sandboxBase}/v1/billing/subscriptions/I-2/suspend`);
     expect(JSON.parse(String(init.body))).toEqual({ reason: "Managed via Medusa" });
   });
+
+  it("reviseSubscription posts the target plan to /revise", async () => {
+    const client = makeClient();
+
+    await client.reviseSubscription("I-3", "P-3", "revise-sub_1-P-3");
+
+    const [url, init] = await lastFetchCall();
+    expect(url).toBe(`${sandboxBase}/v1/billing/subscriptions/I-3/revise`);
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({ plan_id: "P-3" });
+  });
+
+  it("reviseSubscription sends the caller's idempotency key verbatim", async () => {
+    const client = makeClient();
+    // A fresh Response per call: the shared mock hands back one object whose
+    // body is consumed by the first read.
+    (global as any).fetch = jest.fn(async () =>
+      new Response(JSON.stringify({ id: "FAKE-ID" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+
+    await client.reviseSubscription("I-3", "P-3", "revise-sub_1-P-3");
+    await client.reviseSubscription("I-3", "P-3", "revise-sub_1-P-3");
+
+    const headers = ((global as any).fetch as jest.Mock).mock.calls.map(
+      (call: any[]) => call[1].headers["PayPal-Request-Id"]
+    );
+
+    // A retry must not mint a fresh key: PayPal holds the key for 72h and a
+    // new one would apply the plan change twice.
+    expect(headers).toEqual(["revise-sub_1-P-3", "revise-sub_1-P-3"]);
+  });
+
+  it("still mints its own idempotency key for callers that pass none", async () => {
+    const client = makeClient();
+
+    await client.createBillingPlan({ product_id: "P-1", name: "P", billing_cycles: [] });
+
+    const [, init] = await lastFetchCall();
+    expect(
+      (init.headers as Record<string, string>)["PayPal-Request-Id"]
+    ).toEqual(expect.any(String));
+  });
 });
 
 /**

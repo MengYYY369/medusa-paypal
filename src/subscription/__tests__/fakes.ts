@@ -141,7 +141,10 @@ export function makeRailSink() {
   };
 }
 
-export function makeProductModule(variants: any[]) {
+export function makeProductModule(
+  variants: any[],
+  productTitles: Record<string, string> = {}
+) {
   const list = async (filters: any) => {
     const ids = filters?.id;
 
@@ -153,6 +156,10 @@ export function makeProductModule(variants: any[]) {
     // for older-version compatibility paths.
     listProductVariants: jest.fn(list),
     listVariants: jest.fn(list),
+    retrieveProduct: jest.fn(async (id: string) => ({
+      id,
+      title: productTitles[id] ?? id,
+    })),
   };
 }
 
@@ -269,7 +276,8 @@ export function makePaymentModule() {
  */
 export function makeQuery(
   firstOrder: any,
-  currencies: Array<{ code: string; decimal_digits: number }> = []
+  currencies: Array<{ code: string; decimal_digits: number }> = [],
+  variants: any[] = []
 ) {
   return {
     graph: jest.fn(async ({ entity, filters }: any) => {
@@ -279,6 +287,20 @@ export function makeQuery(
         );
 
         return { data: match ? [match] : [] };
+      }
+
+      if (entity === "variant") {
+        const ids = filters?.id;
+        const matched = variants.filter(
+          (variant) => !ids || ids.includes(variant.id)
+        );
+
+        return {
+          data: matched.map((variant) => ({
+            id: variant.id,
+            prices: variant.prices ?? [],
+          })),
+        };
       }
 
       if (entity === "order_payment_collection") {
