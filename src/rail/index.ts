@@ -110,7 +110,15 @@ export class PaypalApprovalPendingError extends MedusaError {
 const PAYPAL_SUBSCRIPTION_MODULE = "paypalSubscription";
 
 type SubscriptionModuleLike = {
-  listSubscriptions?: (filters?: any, config?: any) => Promise<any[]>;
+  /**
+   * The plugin's own alias, and the reason `normalizeListResult` exists: it is
+   * named `list*` but returns `[rows, count]` like `listAndCount*` does.
+   */
+  listSubscriptions?: (
+    filters?: any,
+    config?: any,
+  ) => Promise<[any[], number] | any[]>;
+  /** Framework-generated; a plain array, unlike the alias above. */
   listPaypalSubscriptions?: (filters?: any, config?: any) => Promise<any[]>;
   requestLifecycleAction?: (
     id: string,
@@ -136,6 +144,20 @@ function resolveSubscriptionModule(
   } catch {
     return null;
   }
+}
+
+/**
+ * `listSubscriptions` is a `listAndCount` alias (it returns `[rows, count]`),
+ * while the framework's generated `listPaypalSubscriptions` returns a plain
+ * array. Accept both shapes: a misread tuple is silent (every row is dropped),
+ * which is exactly the bug this normalises away.
+ */
+function normalizeListResult(result: unknown): any[] {
+  if (Array.isArray(result)) {
+    return Array.isArray(result[0]) ? (result[0] as any[]) : (result as any[]);
+  }
+
+  return [];
 }
 
 /**
@@ -263,7 +285,7 @@ export function createPaypalRail(
           return [];
         }
 
-        const rows = (await list.call(service)) ?? [];
+        const rows = normalizeListResult(await list.call(service));
 
         return rows
           .map(toNativeSubscriptionRecord)
@@ -291,10 +313,11 @@ export function createPaypalRail(
           return { status: "skipped", reason: "capability_absent" };
         }
 
-        const rows =
-          (await service.listSubscriptions({
+        const rows = normalizeListResult(
+          await service.listSubscriptions({
             paypal_subscription_id: id,
-          })) ?? [];
+          }),
+        );
         const row = rows[0];
 
         if (!row) {

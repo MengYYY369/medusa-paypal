@@ -575,6 +575,14 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
 
   // -- Listing / detail ----------------------------------------------------
 
+  /**
+   * Alias for `listAndCountPaypalSubscriptions`.
+   *
+   * Note the shape: this returns `[rows, count]`, unlike the framework's
+   * convention for `list*` methods (and unlike the generated
+   * `listPaypalSubscriptions`, which returns a plain array). Callers must
+   * destructure — `rows.map(...)` on this result silently drops every row.
+   */
   async listSubscriptions(
     filters: Record<string, unknown> = {},
     config?: FindConfig<any>

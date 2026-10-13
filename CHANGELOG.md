@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.7] - 2026-10-10
+
+_0.10.6 上线后的生产回归发现：宿主 `native-subscription-backfill` job 每小时日志恒为
+`scanned 0`，真实客户那条 ACTIVE 订阅 `I-FLUJ8DR2KG23` 至今没有宿主镜像行 ——
+结账前置闸门 ⑦ 与 auto-renew / payment-method 护栏 ⑨⑩ 都靠宿主 `subscription` 表的
+`NATIVE-` 行判定，没有镜像行等于它们全部形同虚设。同一次发布里还修掉同源的第二处缺陷：
+宿主侧取消 native 订阅恒失败（`provider_cancel: {status:"failed"}`），而宿主对 provider
+失败只打 warn、本地行照样置 `CANCELLED` ⇒ 后台取消后 PayPal 侧仍在扣款。_
+
+### Fixed
+
+- **native 镜像 backfill 不再恒 0 行**：`rail.native.listRecords` 把模块返回的
+  `[rows, count]` 元组当数组消费 —— `rows.map(...)` 落在元组的两个元素上，两者都读不到
+  `paypal_subscription_id`，于是被 `.filter(...)` 静默丢光（`scanned 0`，无 warn、无异常）。
+  新增 `normalizeListResult` 同时接受元组与数组两种形状，`listRecords` 与 `cancel` 两处
+  调用点都先归一化再消费。
+- **宿主侧取消 native 订阅不再恒失败**：`rail.native.cancel` 的 `rows[0]` 拿到的是行数组本身
+  （truthy）→ `requestLifecycleAction(undefined, "cancel")` → 抛错 → 恒 `failed`。元组为空时
+  更坏：`rows[0]` 是 `[]`（同样 truthy）→ 取消一个**不存在**的订阅会返回 `cancelled` 假成功。
+  归一化后取到真实 `row.id`；空结果仍答 `provider_row_missing`。
+- **类型改诚实**：`SubscriptionModuleLike.listSubscriptions` 由 `Promise<any[]>` 改为
+  `Promise<[any[], number] | any[]>` —— 原来两个方法都被声明成数组，编译器无法在
+  `.map` / `[0]` 处报错，是这两个缺陷漏网的第一道缺口。
+- `PaypalSubscriptionService.listSubscriptions` 的别名补 JSDoc：写明它返回 `[rows, count]`、
+  与框架 `list*` 约定不同、调用方必须解构。
+
+### Tests
+
+- `rail.spec.ts` 的 4 处 `listSubscriptions` fake 由普通数组改成真实形状 `[[rows], count]`
+  —— 它们此前把错误形状固化成了「正确」，是缺陷漏网的第二道缺口。
+- 新增 2 例：空元组 `[[], 0]` → `[]`；模块只提供框架生成的 `listPaypalSubscriptions`（数组）
+  时 `listRecords` 仍正常。`cancel` 的两条用例改为断言 `requestLifecycleAction` 的**调用参数**
+  （`["sub_1", "cancel"]`），而不只是返回值 —— 元组误用时 `provider_row_id` 是 `undefined`，
+  只断言返回值会漏掉它。
+
 ## [0.10.6] - 2026-10-10
 
 _0.10.5 上线后的生产回归发现：对 `APPROVAL_PENDING`（买家从未在 PayPal 同意过）的订阅行调
