@@ -246,6 +246,16 @@ const SUBSCRIPTION_CRADLE_KEYS = [
   "paypalSubscription",
   "order",
   "product",
+  // The host's own subscription engine, when it is registered and listed in
+  // this module's `dependencies`. In this workspace that is
+  // `@mengyyy369/reorder`, whose Medusa module key is "subscription" (its
+  // `SUBSCRIPTION_MODULE` export) - "reorder" is kept as a second candidate
+  // because that is the package name hosts tend to list it under. Whichever
+  // one answers is what the engine reads for the cross-rail half of the
+  // exclusivity check; unregistered answers undefined and the check keeps its
+  // native-only behavior.
+  "subscription",
+  "reorder",
 ] as const;
 
 function resolveOptionalCradleDependency(
@@ -516,6 +526,7 @@ export default class PaypalModuleService extends AbstractPaymentProvider<PaypalP
       productModule: modules["product"],
       orderModule: modules["order"],
       paymentModule: this.paymentModuleService,
+      crossRailModule: modules["subscription"] ?? modules["reorder"],
       options: engineOptions,
     });
 

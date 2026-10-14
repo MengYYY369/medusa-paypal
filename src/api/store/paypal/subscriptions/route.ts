@@ -1,6 +1,7 @@
 import { MedusaRequest, MedusaResponse, MedusaStoreRequest } from "@medusajs/framework/http";
 import { ContainerRegistrationKeys, MedusaError, Modules } from "@medusajs/framework/utils";
 import { resolveSubscriptionModule } from "../../../lib/paypal";
+import { resolveCrossRailModule } from "../../../../modules/paypal-subscription/lib/cross-rail";
 
 type CreateBody = { session_id?: string };
 
@@ -103,7 +104,14 @@ export const POST = async (req: MedusaRequest<CreateBody>, res: MedusaResponse) 
         customerId: cart.customer_id ?? null,
         variantId: detection.variant.id,
       },
-      { productModule: req.scope.resolve(Modules.PRODUCT) }
+      {
+        productModule: req.scope.resolve(Modules.PRODUCT),
+        // The host's own rail, when it is registered: a live row there covers
+        // the same Medusa product too, and reading only this plugin's table is
+        // what let a customer end up with two subscriptions for one product
+        // (2026-10-14). A missing module keeps the native-only check.
+        crossRailModule: resolveCrossRailModule(req.scope),
+      }
     );
   } catch (error) {
     if (

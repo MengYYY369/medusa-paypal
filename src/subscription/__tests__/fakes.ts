@@ -38,9 +38,19 @@ export class FakeSubscriptionModule {
 
   async listPaypalPlans(filters: any = {}) {
     return this.plans.filter((plan) =>
-      Object.entries(filters).every(
-        ([key, value]) => plan[key] === value || value === undefined
-      )
+      Object.entries(filters).every(([key, value]) => {
+        if (value === undefined) {
+          return true;
+        }
+
+        // The engine asks for several variants at once when it looks for a
+        // PayPal product to reuse across a product's variants.
+        if (Array.isArray(value)) {
+          return value.includes(plan[key]);
+        }
+
+        return plan[key] === value;
+      })
     );
   }
 
@@ -147,8 +157,13 @@ export function makeProductModule(
 ) {
   const list = async (filters: any) => {
     const ids = filters?.id;
+    const productId = filters?.product_id;
 
-    return variants.filter((variant) => !ids || ids.includes(variant.id));
+    return variants.filter(
+      (variant) =>
+        (!ids || ids.includes(variant.id)) &&
+        (!productId || variant.product_id === productId)
+    );
   };
 
   return {
@@ -359,6 +374,36 @@ export function makeWorkflowEngine() {
 }
 
 /** Standard ACTIVE subscription row shaped like the module rows. */
+/**
+ * The host's own subscription engine (reorder), reduced to the single call the
+ * cross-rail exclusivity check makes.
+ *
+ * It answers `[rows, count]` like the real module does: that tuple is exactly
+ * what the check has to normalize, so a fake answering a plain array would
+ * hide a regression there.
+ */
+export function makeCrossRailModule(rows: any[] = []) {
+  return {
+    listSubscriptions: jest.fn(async (filters: any = {}) => {
+      const matched = rows.filter((row) =>
+        Object.entries(filters).every(([key, value]) => {
+          if (value === undefined) {
+            return true;
+          }
+
+          if (Array.isArray(value)) {
+            return value.includes(row[key]);
+          }
+
+          return row[key] === value;
+        })
+      );
+
+      return [matched, matched.length];
+    }),
+  };
+}
+
 export function makeRow(overrides: Record<string, unknown> = {}) {
   return {
     id: "sub_1",

@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-10-14
+
+_0.11.0 的跨轨排他守卫在生产上没生效：模块键写错了。`@mengyyy369/reorder` 注册的 Medusa
+模块键是 **`subscription`**（它自己的 `SUBSCRIPTION_MODULE` 导出），而 0.11.0 只试了包名
+`reorder` → 解析成 `undefined` → 检查静默退回 native-only（0.11.0 镜像已在生产部署，生产探针
+`probe-cross-rail.cjs` 实测 `REORDER_MODULE missing` / `WITH_CROSS_RAIL ALLOWED`）。本版修掉，
+并加单测钉住键序。_
+
+### Fixed
+
+- 跨轨模块查找改按 `["subscription", "reorder"]` 顺序尝试（provider 的 cradle 两个键都列，
+  取先答者；`resolveCrossRailModule(scope)` 同样先 `subscription`）。宿主
+  `medusa-config.ts` 的 payment 模块 `dependencies` 因此应写 `"subscription"`（那才是真实键）。
+- 新增 `src/modules/paypal-subscription/__tests__/cross-rail.spec.ts`（3 例：优先
+  `subscription`、回退 `reorder`、都没有时 undefined）。
+
+## [0.11.0] - 2026-10-14
+
+_0.10.7 上线后的生产复验发现两个 P1 缺陷：宿主自营轨（vaulted / 手动续费）的活订阅对本插件的
+排他守卫完全不可见，客户因此能为同一商品开出第二份 PayPal 协议（真双扣）；同商品跨 variant
+改签（月付 ↔ 年付）必被 PayPal 以 `PLAN_PRODUCT_NOT_COMPATIBLE` 拒掉，因为每个 variant 各自
+建了一个 PayPal product。两项都在本版修掉，同时执行计划 §7 的三项收尾。_
+
+### Fixed
+
+- **跨轨排他：本插件的 R5 守卫现在也读宿主自营轨。** `assertNoConflictingSubscription` 原先只查
+  本插件自己的 `paypal_subscription` 表，宿主 reorder 轨的活行看不见 —— 2026-10-13 生产账号就是
+  这样同时持有 `SUB-TRIAL-b28ce432…`（vaulted，手动）与 `NATIVE-paypal-I-J8H261E0436F`（native）
+  两条同商品活订阅。现在通过新增的可选模块槽位 `crossRailModule` 读宿主的 subscription 模块：
+  `active` / `paused` 且 `product_id` 相同的行会像 native 行一样拒绝（同一个
+  `SUBSCRIPTION_ALREADY_ACTIVE`），`NATIVE-` 前缀的镜像行被跳过（那本来就是本插件的订阅，
+  native 半边已经查过），模块缺失或读取异常一律放行（fail-open，与宿主结账门读者的既有哲学一致）。
+- **同商品跨 variant 改签不再必被 PayPal 拒**：`ensurePlan` 新建 PayPal product 前先找同一 Medusa
+  product 下任一 variant 已有的 `paypal_product_id` 并复用；`assertPlanSwitchIsIntraProduct`
+  除 Medusa product 外还比两个计划行所属的 PayPal product，不一致时给出可读文案
+  （原先转发 PayPal 的 422 `PLAN_PRODUCT_NOT_COMPATIBLE`，客户无法据此行动）。
+- 接线：provider 的 cradle 键新增 `"reorder"`（宿主需在 payment 模块 `dependencies` 里加
+  `"reorder"`）；storefront 的 POST 路由用新增的 `resolveCrossRailModule(scope)` 取它。
+
+### Changed (breaking)
+
+- **`listSubscriptions` 改名为 `listSubscriptionsWithCount`**（计划 §7-1）。旧名字像框架其他
+  `list*`（返回普通数组），实际返回 `[rows, count]` —— 这正是 0.10.7 修掉的两个静默缺陷的成因。
+  改名后返回值形状不变，调用方写 `service.listSubscriptionsWithCount(filters)`。
+- **`rail.native.listRecords` 分页**（计划 §7-2）：原先一次无界查询，现在按 200 行分页读完，
+  短页即终止（另设 200 页失控保护）。镜像表是 diff 语义，截断读会被误判成删除，所以停止规则
+  取「模块自己答完」而不是固定上限。`cancel` 的单行查询也补了 `{ take: 1 }`。
+
+### Tests
+
+- 新增 8 例：跨轨守卫 5 例（活行拦住 / paused 也拦 / 镜像行忽略 / 不同商品放行 / 读不到时
+  fail-open 并 warn）、计划复用 2 例（同商品 sibling variant 复用同一个 PayPal product；不同
+  商品各建各的）、改签 1 例（两个 PayPal product 不一致时拒绝且不调 PayPal）。
+- `rail.spec.ts` 新增分页 1 例（200 行满页 + 3 行短页 → 两次查询、203 条记录）。
+- 测试工装：`fakes.ts` 的 `listPaypalPlans` 支持数组过滤（sibling variant 查询会传数组）、
+  `makeProductModule` 尊重 `product_id` 过滤、新增 `makeCrossRailModule`（照真实模块返回
+  `[rows, count]` 元组，以免再次把错误形状固化成「正确」）。
+
 ## [0.10.7] - 2026-10-10
 
 _0.10.6 上线后的生产回归发现：宿主 `native-subscription-backfill` job 每小时日志恒为

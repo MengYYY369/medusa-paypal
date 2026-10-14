@@ -6,6 +6,7 @@ import { PAYPAL_RAIL_KIND } from "../../rail/records";
 import { nativeSubscriptionChangedPayloads } from "../../rail/__tests__/native-subscription-changed.fixture";
 import {
   FakeSubscriptionModule,
+  makeCrossRailModule,
   makeEventBus,
   makeFirstOrder,
   makeOrderModule,
@@ -54,6 +55,7 @@ type Harness = {
   paymentModule: ReturnType<typeof makePaymentModule>;
   workflowEngine: ReturnType<typeof makeWorkflowEngine>;
   query?: ReturnType<typeof makeQuery>;
+  crossRailModule?: any;
   engine: SubscriptionEngine;
 };
 
@@ -72,6 +74,12 @@ function makeHarness(opts: {
   sessionContextCustomer?: string;
   /** Drops the query tool, mirroring the payment provider's cradle. */
   withoutQuery?: boolean;
+  /**
+   * The host's own subscription engine, as the host wires it through the
+   * payment module's dependencies. Absent (the default) mirrors a host that
+   * has not been bumped yet: the cross-rail half of the check stands down.
+   */
+  crossRailModule?: any;
 } = {}): Harness {
   const subscriptionModule = new FakeSubscriptionModule();
   const eventBus = makeEventBus();
@@ -97,6 +105,7 @@ function makeHarness(opts: {
     paymentModule,
     workflowEngine,
     query,
+    crossRailModule: opts.crossRailModule,
     // The host-wired rail sink: the engine publishes every transition through
     // it and knows no event name of its own.
     options: { onNativeSubscriptionChanged: rail.hook },
@@ -112,6 +121,7 @@ function makeHarness(opts: {
     paymentModule,
     workflowEngine,
     query,
+    crossRailModule: opts.crossRailModule,
     engine,
   };
 }
@@ -184,6 +194,70 @@ describe("plan management", () => {
 
     expect(second.planRow.paypal_plan_id).toBe("plan_P1");
     expect(h.client.createBillingPlan).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses a sibling variant's PayPal product so a plan switch stays possible", async () => {
+    // PayPal refuses a revise whose plans belong to different products
+    // (PLAN_PRODUCT_NOT_COMPATIBLE), so every variant of one Medusa product has
+    // to hang off the same PayPal product. Before this, a monthly plan and a
+    // yearly plan of the same product were minted under two PayPal products and
+    // the switch was impossible.
+    const monthly = makeVariant({ product_id: "prod_1" });
+    const yearly = makeVariant({
+      id: "variant_2",
+      title: "Yearly Club",
+      product_id: "prod_1",
+      metadata: { paypal_subscription: { interval_unit: "YEAR", interval_count: 1 } },
+      prices: [{ currency_code: "usd", amount: 199 }],
+    });
+    const h = makeHarness({ variants: [monthly, yearly] });
+
+    await h.engine.ensurePlan({
+      variant: monthly,
+      config: { interval_unit: "MONTH", interval_count: 1, product_type: "SERVICE" },
+      currencyCode: "usd",
+      amount: 19.99,
+    });
+
+    const created = await h.engine.ensurePlan({
+      variant: yearly,
+      config: { interval_unit: "YEAR", interval_count: 1, product_type: "SERVICE" },
+      currencyCode: "usd",
+      amount: 199,
+    });
+
+    expect(h.client.createBillingProduct).toHaveBeenCalledTimes(1);
+    expect(created.planRow.paypal_product_id).toBe("prod_P1");
+    expect(h.module.plans).toHaveLength(2);
+  });
+
+  it("mints its own PayPal product for a variant of another product", async () => {
+    const monthly = makeVariant({ product_id: "prod_1" });
+    const poster = makeVariant({
+      id: "variant_3",
+      title: "Poster Club",
+      product_id: "prod_2",
+    });
+    const h = makeHarness({ variants: [monthly, poster] });
+
+    await h.engine.ensurePlan({
+      variant: monthly,
+      config: { interval_unit: "MONTH", interval_count: 1, product_type: "SERVICE" },
+      currencyCode: "usd",
+      amount: 19.99,
+    });
+
+    const created = await h.engine.ensurePlan({
+      variant: poster,
+      config: { interval_unit: "MONTH", interval_count: 1, product_type: "SERVICE" },
+      currencyCode: "usd",
+      amount: 9.99,
+    });
+
+    // A different Medusa product must NOT reuse prod_1's PayPal product:
+    // PayPal ties a plan to its product, and the switch guard compares them.
+    expect(h.client.createBillingProduct).toHaveBeenCalledTimes(2);
+    expect(created.planRow.paypal_product_id).toBe("prod_P1");
   });
 
   it("mints a new plan version when the price changes", async () => {
@@ -398,6 +472,129 @@ describe("duplicate-subscription guard (R5)", () => {
         variantId: "variant_2",
       })
     ).resolves.toBeUndefined();
+  });
+
+  it("blocks a live subscription held on the host's own rail (cross-rail R5)", async () => {
+    // 2026-10-14: the hole the production account fell through. A vaulted
+    // (manual) row covers the product, this plugin's own table knows nothing
+    // about it, and the customer ends up with two live subscriptions for one
+    // product - two charges.
+    const h = makeHarness({
+      variants: [monthly, yearly],
+      productTitles: { prod_1: "Monthly Club" },
+      crossRailModule: makeCrossRailModule([
+        {
+          id: "01SUB",
+          reference: "SUB-1",
+          status: "active",
+          customer_id: "cus_1",
+          product_id: "prod_1",
+        },
+      ]),
+    });
+
+    await expect(
+      h.engine.assertNoConflictingSubscription({
+        customerId: "cus_1",
+        variantId: "variant_2",
+      })
+    ).rejects.toMatchObject({
+      type: MedusaError.Types.INVALID_DATA,
+      code: "SUBSCRIPTION_ALREADY_ACTIVE",
+      message: expect.stringContaining("Monthly Club"),
+    });
+  });
+
+  it("counts a paused row on the other rail as occupying the product", async () => {
+    const h = makeHarness({
+      variants: [monthly, yearly],
+      crossRailModule: makeCrossRailModule([
+        {
+          id: "01SUB",
+          reference: "SUB-1",
+          status: "paused",
+          customer_id: "cus_1",
+          product_id: "prod_1",
+        },
+      ]),
+    });
+
+    await expect(
+      h.engine.assertNoConflictingSubscription({
+        customerId: "cus_1",
+        variantId: "variant_2",
+      })
+    ).rejects.toMatchObject({ code: "SUBSCRIPTION_ALREADY_ACTIVE" });
+  });
+
+  it("ignores the other rail's mirror of a provider subscription", async () => {
+    // The host mirrors every subscription of THIS plugin as a NATIVE- row.
+    // Counting that row here would refuse a legitimate re-subscribe after a
+    // cancel, because the mirror outlives the agreement.
+    const h = makeHarness({
+      variants: [monthly, yearly],
+      crossRailModule: makeCrossRailModule([
+        {
+          id: "01MIRROR",
+          reference: "NATIVE-paypal-I-ABC123",
+          status: "active",
+          customer_id: "cus_1",
+          product_id: "prod_1",
+        },
+      ]),
+    });
+
+    await expect(
+      h.engine.assertNoConflictingSubscription({
+        customerId: "cus_1",
+        variantId: "variant_2",
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it("lets a different product on the other rail through", async () => {
+    const h = makeHarness({
+      variants: [monthly, yearly, otherProduct],
+      crossRailModule: makeCrossRailModule([
+        {
+          id: "01SUB",
+          reference: "SUB-1",
+          status: "active",
+          customer_id: "cus_1",
+          product_id: "prod_2",
+        },
+      ]),
+    });
+
+    await expect(
+      h.engine.assertNoConflictingSubscription({
+        customerId: "cus_1",
+        variantId: "variant_2",
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it("fails open when the other rail cannot answer", async () => {
+    // Same philosophy as the host's own gate readers: a rail we cannot read
+    // must not stop a legitimate checkout. The native half of the check has
+    // already run by then, so the worst case is the pre-2026-10-14 behavior.
+    const h = makeHarness({
+      variants: [monthly, yearly],
+      crossRailModule: {
+        listSubscriptions: jest.fn().mockRejectedValue(new Error("reorder is down")),
+      },
+    });
+
+    await expect(
+      h.engine.assertNoConflictingSubscription({
+        customerId: "cus_1",
+        variantId: "variant_2",
+      })
+    ).resolves.toBeUndefined();
+
+    expect(loggerStub.warn).toHaveBeenCalledWith(
+      expect.stringContaining("Cross-rail subscription check failed")
+    );
   });
 
   it("scopes the check to the buyer - another customer's subscription is not theirs", async () => {
@@ -1585,6 +1782,45 @@ describe("plan switch (revise)", () => {
       type: MedusaError.Types.INVALID_DATA,
       message: expect.stringContaining("same product"),
     });
+    expect(h.client.reviseSubscription).not.toHaveBeenCalled();
+    expect(h.module.subscriptions[0].variant_id).toBe("variant_1");
+  });
+
+  it("refuses a switch whose plans live under different PayPal products, with a way out", async () => {
+    // Plans minted before a product's variants shared one PayPal product.
+    // PayPal answers 422 PLAN_PRODUCT_NOT_COMPATIBLE, which tells the customer
+    // nothing actionable, so the engine refuses it here and names the fix.
+    const h = makeHarness({ variants: [monthly, yearly] });
+    const row = await h.module.createPaypalSubscriptions(
+      makeRow({
+        status: "ACTIVE",
+        variant_id: "variant_1",
+        paypal_plan_id: "plan_old",
+      })
+    );
+    await h.module.createPaypalPlans({
+      variant_id: "variant_1",
+      currency_code: "usd",
+      paypal_product_id: "PROD-OLD",
+      paypal_plan_id: "plan_old",
+      config_hash: "hash_old",
+    });
+    await h.module.createPaypalPlans({
+      variant_id: "variant_2",
+      currency_code: "usd",
+      paypal_product_id: "PROD-NEW",
+      paypal_plan_id: "plan_new",
+      config_hash: "hash_new",
+    });
+
+    await expect(
+      h.engine.customerRevise(row[0], "cus_1", { variantId: "variant_2" })
+    ).rejects.toMatchObject({
+      type: MedusaError.Types.INVALID_DATA,
+      message: expect.stringContaining("separate PayPal products"),
+    });
+
+    // Refused before PayPal is asked, and the row keeps its plan.
     expect(h.client.reviseSubscription).not.toHaveBeenCalled();
     expect(h.module.subscriptions[0].variant_id).toBe("variant_1");
   });

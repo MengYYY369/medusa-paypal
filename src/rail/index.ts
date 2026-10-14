@@ -111,14 +111,19 @@ const PAYPAL_SUBSCRIPTION_MODULE = "paypalSubscription";
 
 type SubscriptionModuleLike = {
   /**
-   * The plugin's own alias, and the reason `normalizeListResult` exists: it is
-   * named `list*` but returns `[rows, count]` like `listAndCount*` does.
+   * The plugin's own count-returning read, and the reason
+   * `normalizeListResult` exists: the framework's `list*` convention promises a
+   * plain array, so a caller that assumes one gets a tuple whose first element
+   * is the array of rows.
+   *
+   * Renamed from `listSubscriptions` in 0.11.0: the old name looked like every
+   * other `list*` and the shape was the one thing callers got wrong.
    */
-  listSubscriptions?: (
+  listSubscriptionsWithCount?: (
     filters?: any,
     config?: any,
   ) => Promise<[any[], number] | any[]>;
-  /** Framework-generated; a plain array, unlike the alias above. */
+  /** Framework-generated; a plain array, unlike the count-returning read above. */
   listPaypalSubscriptions?: (filters?: any, config?: any) => Promise<any[]>;
   requestLifecycleAction?: (
     id: string,
@@ -147,7 +152,7 @@ function resolveSubscriptionModule(
 }
 
 /**
- * `listSubscriptions` is a `listAndCount` alias (it returns `[rows, count]`),
+ * `listSubscriptionsWithCount` answers `[rows, count]` (as its name now says),
  * while the framework's generated `listPaypalSubscriptions` returns a plain
  * array. Accept both shapes: a misread tuple is silent (every row is dropped),
  * which is exactly the bug this normalises away.
@@ -158,6 +163,51 @@ function normalizeListResult(result: unknown): any[] {
   }
 
   return [];
+}
+
+/** Rows per page when the rail reads the module. */
+const LIST_PAGE_SIZE = 200;
+
+/**
+ * Runaway guard for `listAllRows`: 200 pages is 40k subscriptions, orders of
+ * magnitude past any real install, and a loop that long means the module is
+ * answering something the rail does not understand.
+ */
+const LIST_PAGE_LIMIT = 200;
+
+/**
+ * Reads every row in pages of `LIST_PAGE_SIZE`.
+ *
+ * The rail feeds a mirror table, which diffs what it holds against what it
+ * reads - so a truncated read is not a smaller answer, it is a WRONG one (rows
+ * the host still holds would look deleted). That rules out a fixed cap as the
+ * stopping rule: paging keeps each query bounded as the table grows, and the
+ * loop ends on the module's own answer instead.
+ */
+async function listAllRows(
+  service: any,
+  list: (...args: any[]) => any,
+): Promise<any[]> {
+  const rows: any[] = [];
+
+  for (let page = 0; page < LIST_PAGE_LIMIT; page += 1) {
+    const result = normalizeListResult(
+      await list.call(service, {}, {
+        take: LIST_PAGE_SIZE,
+        skip: page * LIST_PAGE_SIZE,
+      }),
+    );
+
+    rows.push(...result);
+
+    // A short page is the last page: the module answered with less than a full
+    // page, so there is nothing after it.
+    if (result.length < LIST_PAGE_SIZE) {
+      break;
+    }
+  }
+
+  return rows;
 }
 
 /**
@@ -276,7 +326,7 @@ export function createPaypalRail(
 
       async listRecords(container): Promise<NativeSubscriptionRecord[]> {
         const service = resolveSubscriptionModule(container);
-        const list = service?.listSubscriptions ?? service?.listPaypalSubscriptions;
+        const list = service?.listSubscriptionsWithCount ?? service?.listPaypalSubscriptions;
 
         if (!list) {
           // No module: there is nothing to read, and an empty list is the
@@ -285,7 +335,7 @@ export function createPaypalRail(
           return [];
         }
 
-        const rows = normalizeListResult(await list.call(service));
+        const rows = await listAllRows(service, list);
 
         return rows
           .map(toNativeSubscriptionRecord)
@@ -309,14 +359,17 @@ export function createPaypalRail(
 
         const service = resolveSubscriptionModule(container);
 
-        if (!service?.listSubscriptions || !service.requestLifecycleAction) {
+        if (!service?.listSubscriptionsWithCount || !service.requestLifecycleAction) {
           return { status: "skipped", reason: "capability_absent" };
         }
 
         const rows = normalizeListResult(
-          await service.listSubscriptions({
-            paypal_subscription_id: id,
-          }),
+          await service.listSubscriptionsWithCount(
+            {
+              paypal_subscription_id: id,
+            },
+            { take: 1 },
+          ),
         );
         const row = rows[0];
 

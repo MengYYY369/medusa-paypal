@@ -17,7 +17,7 @@ export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
     ? { status: query.status.split(",").map((s) => s.trim()) }
     : {};
 
-  const [subscriptions, count] = await module.listSubscriptions(
+  const [subscriptions, count] = await module.listSubscriptionsWithCount(
     {
       ...(query.customer_id && { customer_id: query.customer_id }),
       ...(query.variant_id && { variant_id: query.variant_id }),

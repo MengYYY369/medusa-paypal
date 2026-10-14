@@ -63,6 +63,15 @@ export type SubscriptionEngineModules = {
   paymentModule?: any;
   /** Workflow engine, only used by the reconciliation job to replay the standard payment workflow. */
   workflowEngine?: any;
+  /**
+   * The host's own subscription engine (reorder), when it is registered AND
+   * listed in the payment module's `dependencies`. Read for the cross-rail half
+   * of the exclusivity check: a live row there covers the same Medusa product,
+   * and the `NATIVE-` mirror rows it keeps for THIS plugin's subscriptions are
+   * filtered out. Missing (or too old to expose `listSubscriptions`) keeps the
+   * native-only behavior.
+   */
+  crossRailModule?: any;
 };
 
 export type SubscriptionEngineOptions = {
@@ -159,6 +168,69 @@ async function listVariantsByIds(
       take: variantIds.length,
     })) ?? []
   );
+}
+
+/**
+ * Every variant id of one Medusa product.
+ *
+ * PayPal refuses a revise whose plans belong to different products
+ * (PLAN_PRODUCT_NOT_COMPATIBLE), so all variants of a product have to share a
+ * single PayPal product - which means plan creation has to look across the
+ * product's variants, not just at the variant being checked out.
+ */
+async function listVariantIdsByProductId(
+  productModule: any,
+  productId: string
+): Promise<string[]> {
+  const list = productModule?.listProductVariants ?? productModule?.listVariants;
+
+  if (typeof list !== "function" || !productId) {
+    return [];
+  }
+
+  const rows =
+    (await list.call(productModule, { product_id: productId }, { take: 200 })) ??
+    [];
+
+  return [
+    ...new Set((rows as any[]).map((row) => row?.id).filter(Boolean)),
+  ] as string[];
+}
+
+/**
+ * The reorder rail's prefix for the rows it keeps to mirror a
+ * provider-managed subscription. Those rows describe THIS plugin's
+ * subscriptions, so the cross-rail check has to skip them: the native check
+ * already covered them, and counting them twice would refuse a legitimate
+ * re-subscribe after a cancel.
+ */
+const NATIVE_SUBSCRIPTION_REFERENCE_PREFIX = "NATIVE-";
+
+/**
+ * Statuses the reorder rail counts as occupying a product, in its own enum
+ * casing (`active` / `paused`). Same rule as its checkout gate.
+ */
+const CROSS_RAIL_OCCUPYING_STATUSES = ["active", "paused"];
+
+function isMirrorReference(reference: unknown): boolean {
+  return (
+    typeof reference === "string" &&
+    reference.startsWith(NATIVE_SUBSCRIPTION_REFERENCE_PREFIX)
+  );
+}
+
+/**
+ * The reorder rail's `listSubscriptions` is a `listAndCount` alias (it answers
+ * `[rows, count]`), while other builds answer a plain array. Normalize both: a
+ * misread tuple is silent - every row is dropped, which would make the
+ * cross-rail check answer "no conflict" for every customer.
+ */
+function toRowArray(result: unknown): any[] {
+  if (Array.isArray(result)) {
+    return Array.isArray(result[0]) ? (result[0] as any[]) : (result as any[]);
+  }
+
+  return [];
 }
 
 /**
@@ -402,11 +474,12 @@ export class SubscriptionEngine {
       ...new Set(liveRows.map((row) => row.variant_id).filter(Boolean)),
     ];
 
-    if (!liveVariantIds.length) {
-      return;
-    }
-
-    const liveVariants = await listVariantsByIds(productModule, liveVariantIds);
+    // No early return on an empty native list: the host's own rail is read
+    // below, and a customer whose ONLY subscription lives there is exactly the
+    // case this check exists for.
+    const liveVariants = liveVariantIds.length
+      ? await listVariantsByIds(productModule, liveVariantIds)
+      : [];
 
     const conflicting = liveRows.find((row) => {
       const variant = (liveVariants ?? []).find(
@@ -417,7 +490,19 @@ export class SubscriptionEngine {
     });
 
     if (!conflicting) {
-      return;
+      // The host's own rail keeps its subscriptions in its own table: a live
+      // row there covers the same Medusa product, so it has to block a second
+      // PayPal agreement exactly like a native row does. Without this, a
+      // customer holding a manual/vaulted plan can still open a Billing
+      // agreement for the same product and be charged twice.
+      const crossRailConflict = await this.hasLiveCrossRailSubscription({
+        customerId,
+        productId: targetProductId,
+      });
+
+      if (!crossRailConflict) {
+        return;
+      }
     }
 
     throw new MedusaError(
@@ -428,6 +513,55 @@ export class SubscriptionEngine {
       )}. Cancel it first, or switch to another plan from your subscriptions page.`,
       "SUBSCRIPTION_ALREADY_ACTIVE"
     );
+  }
+
+  /**
+   * True when the host's own rail holds a live subscription covering this
+   * Medusa product for this customer.
+   *
+   * Rows are matched on `product_id` - the same key the checkout gate uses -
+   * because one product can be sold through several variants, and a switch
+   * between those variants is the legitimate path that must stay open (it is
+   * `POST /store/paypal/subscriptions/:id/revise`, not a second checkout).
+   *
+   * Fail-open on purpose: a missing module, a version whose list method is
+   * named differently, or a read error must not stop a legitimate checkout.
+   * That mirrors the gate's own readers, which let a request through when they
+   * cannot answer.
+   */
+  private async hasLiveCrossRailSubscription({
+    customerId,
+    productId,
+  }: {
+    customerId: string;
+    productId: string;
+  }): Promise<boolean> {
+    const module = this.deps.crossRailModule;
+    const list = module?.listSubscriptions;
+
+    if (typeof list !== "function") {
+      return false;
+    }
+
+    try {
+      const result = await list.call(module, {
+        customer_id: customerId,
+        status: [...CROSS_RAIL_OCCUPYING_STATUSES],
+      });
+
+      return toRowArray(result).some(
+        (row) =>
+          row?.product_id === productId && !isMirrorReference(row?.reference)
+      );
+    } catch (error) {
+      this.deps.logger.warn(
+        `Cross-rail subscription check failed for customer ${customerId}; letting the checkout continue: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+
+      return false;
+    }
   }
 
   /** Product title for a refusal message; the id is a poor thing to show a customer. */
@@ -482,12 +616,12 @@ export class SubscriptionEngine {
       return { planRow: existing[0], config: fullConfig };
     }
 
-    // Products are reusable across currencies and plan versions.
-    const priorPlans = await subscriptionModule.listPaypalPlans({
-      variant_id: variant.id,
-    });
-
-    let productId = priorPlans[0]?.paypal_product_id;
+    // Products are reusable across currencies, plan versions AND sibling
+    // variants. Sharing one PayPal product across every variant of a Medusa
+    // product is what makes a monthly<->yearly switch possible at all: PayPal
+    // refuses a revise whose plans belong to different products
+    // (PLAN_PRODUCT_NOT_COMPATIBLE).
+    let productId = await this.findReusablePaypalProductId(variant);
 
     if (!productId) {
       const product = await client.createBillingProduct({
@@ -1893,6 +2027,53 @@ export class SubscriptionEngine {
   }
 
   /**
+   * A PayPal product this Medusa product already uses, or null when it has no
+   * plan rows yet.
+   *
+   * This variant's own rows come first (the common case: a new plan version or
+   * currency for a variant that already has a product), then its sibling
+   * variants' rows - the part that keeps a plan switch inside one PayPal
+   * product.
+   */
+  private async findReusablePaypalProductId(variant: any): Promise<string | null> {
+    const subscriptionModule = this.deps.subscriptionModule;
+
+    const ownPlans = (await subscriptionModule.listPaypalPlans({
+      variant_id: variant?.id,
+    })) as any[];
+
+    const own = ownPlans?.[0]?.paypal_product_id;
+
+    if (own) {
+      return own;
+    }
+
+    const productId = variant?.product_id;
+    const productModule = this.deps.productModule;
+
+    if (!productId || !productModule) {
+      return null;
+    }
+
+    const siblingIds = (
+      await listVariantIdsByProductId(productModule, productId)
+    ).filter((id) => id !== variant.id);
+
+    if (!siblingIds.length) {
+      return null;
+    }
+
+    const siblingPlans = (await subscriptionModule.listPaypalPlans({
+      variant_id: siblingIds,
+    })) as any[];
+
+    return (
+      siblingPlans?.find((plan) => plan?.paypal_product_id)
+        ?.paypal_product_id ?? null
+    );
+  }
+
+  /**
    * Resolves a PayPal plan id back to a local plan row and applies the switch.
    * Returns null (after a warning) when PayPal reports a plan this plugin does
    * not know - a plan created outside the plugin, or pricing the host has since
@@ -1965,6 +2146,52 @@ export class SubscriptionEngine {
         "A subscription can only switch to another plan of the same product. To move to a different product, cancel this subscription and subscribe to the new one."
       );
     }
+
+    // Same Medusa product is not enough for PayPal: the two plans must also
+    // hang off one PayPal product, or the revise comes back 422
+    // PLAN_PRODUCT_NOT_COMPATIBLE with nothing a customer can act on. Plans
+    // minted before this plugin shared the product across a product's variants
+    // are the only way to get here, so name the fix instead of forwarding
+    // PayPal's code.
+    const [currentPlan, targetPlan] = await Promise.all([
+      this.findPlanRowByPaypalPlanId(row.paypal_plan_id),
+      this.findLatestPlanRowForVariant(targetVariant?.id),
+    ]);
+
+    if (
+      currentPlan?.paypal_product_id &&
+      targetPlan?.paypal_product_id &&
+      currentPlan.paypal_product_id !== targetPlan.paypal_product_id
+    ) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "This subscription and the plan you picked were created as separate PayPal products, so PayPal cannot switch between them. Cancel this subscription and subscribe to the new plan instead."
+      );
+    }
+  }
+
+  private async findPlanRowByPaypalPlanId(paypalPlanId?: string | null): Promise<any | null> {
+    if (!paypalPlanId) {
+      return null;
+    }
+
+    const rows = (await this.deps.subscriptionModule.listPaypalPlans({
+      paypal_plan_id: paypalPlanId,
+    })) as any[];
+
+    return rows?.[0] ?? null;
+  }
+
+  private async findLatestPlanRowForVariant(variantId?: string | null): Promise<any | null> {
+    if (!variantId) {
+      return null;
+    }
+
+    const rows = (await this.deps.subscriptionModule.listPaypalPlans({
+      variant_id: variantId,
+    })) as any[];
+
+    return rows?.[0] ?? null;
   }
 
   /**

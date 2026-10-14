@@ -576,14 +576,16 @@ export default class PaypalSubscriptionModuleService extends MedusaService({
   // -- Listing / detail ----------------------------------------------------
 
   /**
-   * Alias for `listAndCountPaypalSubscriptions`.
+   * `listAndCountPaypalSubscriptions`, under a name that says so.
    *
-   * Note the shape: this returns `[rows, count]`, unlike the framework's
-   * convention for `list*` methods (and unlike the generated
-   * `listPaypalSubscriptions`, which returns a plain array). Callers must
-   * destructure — `rows.map(...)` on this result silently drops every row.
+   * The shape is `[rows, count]`. Until 0.11.0 this was called
+   * `listSubscriptions`, which read like every other `list*` method in the
+   * framework (those return a plain array) and cost a silent "every row
+   * disappeared" bug in both directions — the host's mirror backfill and the
+   * cancel path. Callers destructure:
+   * `const [rows] = await service.listSubscriptionsWithCount(filters)`.
    */
-  async listSubscriptions(
+  async listSubscriptionsWithCount(
     filters: Record<string, unknown> = {},
     config?: FindConfig<any>
   ): Promise<[any[], number]> {

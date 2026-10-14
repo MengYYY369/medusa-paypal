@@ -233,10 +233,10 @@ describe("createPaypalRail", () => {
     const rail = createPaypalRail(RAIL_OPTIONS);
     const container = {
       resolve: () => ({
-        // The module's own `listSubscriptions` is a `listAndCount` alias, so it
-        // answers `[rows, count]` — the tuple is the real shape, and reading it
-        // as a plain array silently drops every row.
-        listSubscriptions: async () => [
+        // The module's own `listSubscriptionsWithCount` is a `listAndCount`
+        // alias, so it answers `[rows, count]` — the tuple is the real shape,
+        // and reading it as a plain array silently drops every row.
+        listSubscriptionsWithCount: async () => [
           [
             {
               paypal_subscription_id: "I-1",
@@ -263,10 +263,44 @@ describe("createPaypalRail", () => {
   it("answers an empty list for an empty tuple", async () => {
     const rail = createPaypalRail(RAIL_OPTIONS);
     const container = {
-      resolve: () => ({ listSubscriptions: async () => [[], 0] }),
+      resolve: () => ({ listSubscriptionsWithCount: async () => [[], 0] }),
     } as any;
 
     await expect(rail.native?.listRecords(container)).resolves.toEqual([]);
+  });
+
+  it("pages through the module instead of reading one unbounded query", async () => {
+    // The mirror table diffs what it holds against what it reads, so a
+    // truncated read is not a smaller answer - rows the host still holds would
+    // look deleted. Hence paging with a short-page stop, not a cap.
+    const rail = createPaypalRail(RAIL_OPTIONS);
+    const makePage = (offset: number, size: number) =>
+      Array.from({ length: size }, (_, index) => ({
+        paypal_subscription_id: `I-${offset + index}`,
+        status: "ACTIVE",
+        interval_unit: "MONTH",
+        interval_count: 1,
+      }));
+    const calls: Array<{ take: number; skip: number }> = [];
+    const container = {
+      resolve: () => ({
+        listSubscriptionsWithCount: async (_filters: any, config: any) => {
+          calls.push(config);
+
+          return config.skip === 0
+            ? [makePage(0, 200), 203]
+            : [makePage(200, 3), 203];
+        },
+      }),
+    } as any;
+
+    const records = await rail.native?.listRecords(container);
+
+    expect(calls).toEqual([
+      { take: 200, skip: 0 },
+      { take: 200, skip: 200 },
+    ]);
+    expect(records).toHaveLength(203);
   });
 
   it("reads the framework-generated list method when the alias is absent", async () => {
@@ -295,7 +329,7 @@ describe("createPaypalRail", () => {
     const calls: Array<[string, string]> = [];
     const container = {
       resolve: () => ({
-        listSubscriptions: async () => [
+        listSubscriptionsWithCount: async () => [
           [{ id: "sub_1", paypal_subscription_id: "I-1" }],
           1,
         ],
@@ -318,7 +352,7 @@ describe("createPaypalRail", () => {
 
     const unknown = {
       resolve: () => ({
-        listSubscriptions: async () => [[], 0],
+        listSubscriptionsWithCount: async () => [[], 0],
         // The capability has to be there for the lookup to be reached at all:
         // a module without it answers `capability_absent` instead.
         requestLifecycleAction: async () => undefined,
@@ -332,7 +366,7 @@ describe("createPaypalRail", () => {
     const failedCalls: Array<[string, string]> = [];
     const failing = {
       resolve: () => ({
-        listSubscriptions: async () => [
+        listSubscriptionsWithCount: async () => [
           [{ id: "sub_1", paypal_subscription_id: "I-1" }],
           1,
         ],
